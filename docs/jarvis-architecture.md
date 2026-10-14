@@ -1,6 +1,6 @@
 # JARVIS Architecture Plan
 
-The existing Site Roaster application remains intact. The assistant should begin as a separate local-first subsystem so security-sensitive desktop capabilities do not get mixed into the public website analyzer.
+JARVIS is a standalone local-first project. Security-sensitive desktop capabilities are kept separate from any public-facing web application.
 
 ## Proposed components
 
