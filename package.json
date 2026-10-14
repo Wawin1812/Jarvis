@@ -1,0 +1,16 @@
+{
+  "name": "jarvis",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:client": "npm run dev --workspace=client",
+    "build:backend": "npm run build --workspace=backend",
+    "build:client": "npm run build --workspace=client",
+    "test": "npm test --workspace=backend",
+    "typecheck": "npm run typecheck --workspace=backend",
+    "start:jarvis": "./scripts/start-jarvis.sh",
+    "stop:jarvis": "./scripts/stop-jarvis.sh"
+  },
+  "workspaces": ["backend", "client"]
+}

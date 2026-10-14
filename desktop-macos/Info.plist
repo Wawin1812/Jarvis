@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>JARVIS</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.jarvis.desktop</string>
+	<key>CFBundleName</key>
+	<string>JARVIS</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>JARVIS uses the microphone only after you explicitly enable voice input.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>JARVIS transcribes an explicitly started voice command so it can be sent to your local assistant.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>JARVIS captures the screen only after you explicitly request screen assistance.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

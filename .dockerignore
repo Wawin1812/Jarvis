@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+dist
+**/dist
+dist-test
+**/dist-test
+.git
+.env
+**/.env
+desktop-macos/.build
+desktop-macos/.swiftpm
+*.log
