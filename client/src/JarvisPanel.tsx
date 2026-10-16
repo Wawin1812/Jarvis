@@ -56,6 +56,7 @@ export function JarvisPanel() {
   const [speakReplies, setSpeakReplies] = useState(true);
   const [runInBackground, setRunInBackground] = useState(false);
   const [conversation, setConversation] = useState(false);
+  const [requireWake, setRequireWake] = useState(false);
   const [phase, setPhase] = useState('');
   const [live, setLive] = useState('');
   const [jobs, setJobs] = useState<AgentJob[]>([]);
@@ -65,6 +66,7 @@ export function JarvisPanel() {
   const spokenRef = useRef(0);
   const historyRef = useRef<{ user: string; jarvis: string }[]>([]);
   const conversationRef = useRef(false);
+  const requireWakeRef = useRef(false);
   const busyRef = useRef(false);
   const heardRef = useRef(false);
   const announcedRef = useRef(new Set<string>());
@@ -78,6 +80,7 @@ export function JarvisPanel() {
 
   speakRef.current = speakReplies;
   conversationRef.current = conversation;
+  requireWakeRef.current = requireWake;
 
   useEffect(() => () => stopScreenCapture(), []);
 
@@ -171,7 +174,7 @@ export function JarvisPanel() {
     const utterance = new SpeechSynthesisUtterance(text.trim().slice(0, 1_000));
     // Never listen while speaking: the mic would pick up JARVIS's own voice.
     speechRef.current?.stop();
-    utterance.onend = () => { onDone?.(); if (onDone !== resumeListening) setTimeout(resumeListening, 600); };
+    utterance.onend = () => { onDone?.(); if (onDone !== resumeListening) setTimeout(resumeListening, 350); };
     utterance.onerror = utterance.onend;
     window.speechSynthesis.speak(utterance);
   }
@@ -227,6 +230,14 @@ export function JarvisPanel() {
     }
     if (busyRef.current) return;
     if (SLEEP_PHRASES.test(raw)) {
+      if (!requireWakeRef.current) {
+        setConversation(false);
+        conversationRef.current = false;
+        setMessages((current) => [...current, 'JARVIS: hands-free mode off.']);
+        speakNow('Goodbye.');
+        setGoal('');
+        return;
+      }
       awakeUntilRef.current = 0;
       setMessages((current) => [...current, 'JARVIS: going back to sleep. Say “Hey Jarvis” to wake me.']);
       speakNow('Goodbye. Say hey Jarvis when you need me.', resumeListening);
@@ -345,6 +356,13 @@ export function JarvisPanel() {
       return;
     }
     const wake = WAKE_PHRASE.exec(transcript);
+    // Without the wake-word requirement every utterance is a command (a leading "Jarvis" is dropped).
+    const spoken = (wake ? transcript.slice(wake[0].length) : transcript).trim();
+    if (!requireWakeRef.current && spoken.length >= 4) {
+      setGoal(spoken);
+      void sendRef.current(spoken);
+      return;
+    }
     if (wake) {
       const rest = transcript.slice(wake[0].length).trim();
       awakeUntilRef.current = Date.now() + 30_000;
@@ -519,7 +537,10 @@ export function JarvisPanel() {
           <input type="checkbox" checked={runInBackground} onChange={(event) => setRunInBackground(event.target.checked)} /> Run tasks in the background
         </label>
         <label className="jarvis-note">
-          <input type="checkbox" checked={conversation} onChange={(event) => toggleConversation(event.target.checked)} /> Hands-free (say “Hey Jarvis” to wake, “goodbye” to sleep)
+          <input type="checkbox" checked={conversation} onChange={(event) => toggleConversation(event.target.checked)} /> Hands-free conversation (say “goodbye” to stop)
+        </label>
+        <label className="jarvis-note">
+          <input type="checkbox" checked={requireWake} onChange={(event) => setRequireWake(event.target.checked)} /> Only respond after “Hey Jarvis”
         </label>
       </div>
 

@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
     private var history: [(user: String, jarvis: String)] = []
     private var backgroundCheckbox: NSButton!
     private var conversationCheckbox: NSButton!
+    private var wakeCheckbox: NSButton!
     private var awakeUntil = Date.distantPast
     private var stopButton: NSButton!
     private var monitorTimer: Timer?
@@ -112,8 +113,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
         speakCheckbox = NSButton(checkboxWithTitle: "Speak replies aloud", target: nil, action: nil)
         speakCheckbox.state = .on
         backgroundCheckbox = NSButton(checkboxWithTitle: "Run tasks in the background", target: nil, action: nil)
-        conversationCheckbox = NSButton(checkboxWithTitle: "Hands-free (say “Hey Jarvis” to wake, “goodbye” to sleep)", target: self, action: #selector(conversationToggled))
-        let mainStack = verticalStack([title, subtitle, statusLabel, separator(), configStack, separator(), commandStack, speakCheckbox, backgroundCheckbox, conversationCheckbox, scroll], spacing: 10)
+        conversationCheckbox = NSButton(checkboxWithTitle: "Hands-free conversation (say “goodbye” to stop)", target: self, action: #selector(conversationToggled))
+        wakeCheckbox = NSButton(checkboxWithTitle: "Only respond after “Hey Jarvis”", target: nil, action: nil)
+        let mainStack = verticalStack([title, subtitle, statusLabel, separator(), configStack, separator(), commandStack, speakCheckbox, backgroundCheckbox, conversationCheckbox, wakeCheckbox, scroll], spacing: 10)
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(mainStack)
 
@@ -216,6 +218,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
         }
         if foregroundBusy { return }
         if raw.range(of: #"^(goodbye|good bye|that'?s all)\.?$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            if wakeCheckbox.state != .on {
+                conversationCheckbox.state = .off
+                commandField.stringValue = ""
+                appendOutput("JARVIS: hands-free mode off.")
+                speak("Goodbye.")
+                return
+            }
             awakeUntil = .distantPast
             commandField.stringValue = ""
             appendOutput("JARVIS: going back to sleep. Say “Hey Jarvis” to wake me.")
@@ -380,7 +389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self?.resumeListening() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { self?.resumeListening() }
         }
     }
 
@@ -546,7 +555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
                 if let result {
                     self.voiceTranscript = result.bestTranscription.formattedString
                     self.commandField.stringValue = self.voiceTranscript
-                    self.armVoiceTimer(after: 1.5)
+                    self.armVoiceTimer(after: 1.0)
                     if result.isFinal { self.teardownVoice(send: true); return }
                 }
                 if let error {
@@ -584,7 +593,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
                 self.teardownVoice(send: false)
                 if handsFree { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.resumeListening(allowBusy: true) } }
             }
-            else { self.endVoiceInput() }
+            // The pause already ended the sentence: send what was heard now instead of waiting for the final result.
+            else { self.teardownVoice(send: true) }
         }
     }
 
@@ -638,6 +648,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
             return
         }
         let wake = #"^(?:(?:hey|hi|okay|ok)[,\s]+)?jarvis\b[,.!?\s]*"#
+        // Without the wake-word requirement every utterance is a command (a leading "Jarvis" is dropped).
+        if wakeCheckbox.state != .on {
+            var spoken = transcript
+            if let range = transcript.range(of: wake, options: [.regularExpression, .caseInsensitive]) { spoken = String(transcript[range.upperBound...]) }
+            spoken = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+            if spoken.count >= 4 {
+                commandField.stringValue = spoken
+                sendCommand()
+                return
+            }
+        }
         if let range = transcript.range(of: wake, options: [.regularExpression, .caseInsensitive]) {
             let rest = String(transcript[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
             awakeUntil = Date().addingTimeInterval(30)
