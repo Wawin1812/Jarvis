@@ -6,6 +6,8 @@ services:
     env_file:
       - path: ./backend/.env
         required: false
+      - path: ./backend/.env.local
+        required: false
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0

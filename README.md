@@ -18,7 +18,7 @@ brew install ollama && brew services start ollama && ollama pull gemma3:1b
 ./scripts/stop-jarvis.sh
 ```
 
-The script generates the API token and audit key in `backend/.env` and prints the token. Put files you want Jarvis to read in `workspace/`.
+The script generates the API token and audit key in `backend/.env` (or `backend/.env.local`; both are git-ignored) and prints the token. Put files you want Jarvis to read in `workspace/`.
 
 This runs the backend as a plain Node process. Docker (`docker compose up -d --build`) is optional; on an 8 GB Mac, Docker Desktop's VM plus a model causes heavy swapping.
 
@@ -31,7 +31,7 @@ Ollama runs locally: there are no tokens, quotas or API fees, only your RAM, dis
 | `gemma3:1b` (default) | 0.8 GB | Safe on 8 GB; weak at following tool-use instructions |
 | `gemma3:4b` | 3.4 GB | Reliable file reads and image input; needs about 6 GB free, so quit other apps first |
 
-Change `OLLAMA_MODEL` in `backend/.env` and rerun the start script.
+Change `OLLAMA_MODEL` in `backend/.env` (or `backend/.env.local`; both are git-ignored) and rerun the start script.
 
 ## Security boundary
 

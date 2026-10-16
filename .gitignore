@@ -6,6 +6,8 @@ dist-test/
 **/dist-test/
 .env
 **/.env
+.env.local
+**/.env.local
 .build/
 desktop-macos/.build/
 desktop-macos/.swiftpm/

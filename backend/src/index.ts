@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './loadEnv.js';
 import cors from 'cors';
 import express from 'express';
 import rateLimit from 'express-rate-limit';

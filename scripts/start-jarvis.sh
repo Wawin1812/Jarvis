@@ -5,18 +5,21 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
 
-[[ -f backend/.env ]] || cp backend/.env.example backend/.env
+# Use backend/.env, else backend/.env.local, else create .env.local from the example (both are git-ignored).
+env_file=backend/.env
+[[ -f $env_file ]] || env_file=backend/.env.local
+[[ -f $env_file ]] || cp backend/.env.example "$env_file"
 [[ -d node_modules ]] || npm install
 
 # Fill blank secrets once; existing values are never overwritten.
 for key in JARVIS_API_TOKEN JARVIS_AUDIT_KEY; do
-  if grep -qE "^${key}=$" backend/.env; then
-    sed -i.bak "s|^${key}=$|${key}=$(openssl rand -hex 32)|" backend/.env && rm -f backend/.env.bak
-    echo "Generated ${key} in backend/.env"
+  if grep -qE "^${key}=$" "$env_file"; then
+    sed -i.bak "s|^${key}=$|${key}=$(openssl rand -hex 32)|" "$env_file" && rm -f "$env_file.bak"
+    echo "Generated ${key} in $env_file"
   fi
 done
-sed -i.bak 's|^JARVIS_REQUIRE_PERSISTENT_AUDIT=.*|JARVIS_REQUIRE_PERSISTENT_AUDIT=true|' backend/.env && rm -f backend/.env.bak
-grep -q '^JARVIS_FILES_ROOT=' backend/.env || echo 'JARVIS_FILES_ROOT=../workspace' >> backend/.env
+sed -i.bak 's|^JARVIS_REQUIRE_PERSISTENT_AUDIT=.*|JARVIS_REQUIRE_PERSISTENT_AUDIT=true|' "$env_file" && rm -f "$env_file.bak"
+grep -q '^JARVIS_FILES_ROOT=' "$env_file" || echo 'JARVIS_FILES_ROOT=../workspace' >> "$env_file"
 mkdir -p workspace
 
 if ! curl -fsS -m 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
@@ -32,6 +35,6 @@ fi
 echo $! > .run/backend.pid
 sleep 1
 echo "Backend started (pid $(cat .run/backend.pid), log .run/backend.log)"
-echo "API token: $(grep '^JARVIS_API_TOKEN=' backend/.env | cut -d= -f2)"
+echo "API token: $(grep '^JARVIS_API_TOKEN=' "$env_file" | cut -d= -f2)"
 echo "UI: http://127.0.0.1:5173/  (Ctrl+C stops the UI; ./scripts/stop-jarvis.sh stops the backend)"
 exec npm run dev --workspace=client -- --host 127.0.0.1
