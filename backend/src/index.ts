@@ -35,5 +35,9 @@ app.use('/api/jarvis', rateLimit({ windowMs: 60_000, limit: 300, standardHeaders
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 
-app.listen(port, host, () => console.log(`JARVIS backend listening on ${host}:${port}`));
+app.listen(port, host, () => {
+  console.log(`JARVIS backend listening on ${host}:${port}`);
+  // Load the model into memory now so the first command isn't slowed by a cold start.
+  void runtime.model?.complete({ instruction: 'Reply with OK.', userInput: 'ok', timeoutMs: 120_000 }).catch(() => undefined);
+});
 
