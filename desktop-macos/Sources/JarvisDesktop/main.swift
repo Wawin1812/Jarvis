@@ -21,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var audioEngine: AVAudioEngine?
     private var speechRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var micButton: NSButton!
+    private var voiceTimer: Timer?
+    private var voiceTranscript = ""
+    private var voiceSession = 0
     private var pollTimer: Timer?
     private var promptedApprovals = Set<String>()
     private var promptingApproval = false
@@ -61,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let saveButton = button("Save token", action: #selector(saveToken))
         let healthButton = button("Check backend", action: #selector(checkBackend))
-        let micButton = button("Voice command", action: #selector(requestMicrophone))
+        micButton = button("Voice command", action: #selector(toggleVoice))
         let screenButton = button("Enable screen access", action: #selector(requestScreen))
         let analyzeScreenButton = button("Analyze screen", action: #selector(analyzeScreen))
 
@@ -275,18 +279,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func requestMicrophone() {
-        SFSpeechRecognizer.requestAuthorization { [weak self] speechStatus in
-            guard speechStatus == .authorized else {
-                DispatchQueue.main.async { self?.appendOutput("Speech recognition permission was denied. macOS may process speech using Apple’s speech service unless on-device recognition is available.") }
-                return
-            }
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] allowed in
-                guard allowed else {
-                    DispatchQueue.main.async { self?.appendOutput("Microphone permission denied.") }
+    @objc private func toggleVoice() {
+        if audioEngine != nil {
+            endVoiceInput()
+            return
+        }
+        SFSpeechRecognizer.requestAuthorization { speechStatus in
+            DispatchQueue.main.async { [weak self] in
+                guard speechStatus == .authorized else {
+                    self?.appendOutput("Speech recognition permission was denied. Enable it in System Settings → Privacy & Security → Speech Recognition.")
                     return
                 }
-                self?.startVoiceRecognition()
+                AVCaptureDevice.requestAccess(for: .audio) { allowed in
+                    DispatchQueue.main.async {
+                        guard allowed else {
+                            self?.appendOutput("Microphone permission denied. Enable it in System Settings → Privacy & Security → Microphone.")
+                            return
+                        }
+                        self?.startVoiceRecognition()
+                    }
+                }
             }
         }
     }
@@ -338,7 +350,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startVoiceRecognition() {
-        stopVoiceRecognition()
+        teardownVoice(send: false)
+        synthesizer.stopSpeaking(at: .immediate)
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), recognizer.isAvailable else {
             appendOutput("Speech recognition is unavailable.")
             return
@@ -346,31 +359,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let engine = AVAudioEngine()
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        if recognizer.supportsOnDeviceRecognition { request.requiresOnDeviceRecognition = true }
+        voiceSession += 1
+        let session = voiceSession
+        voiceTranscript = ""
         audioEngine = engine
         speechRequest = request
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            if let result {
-                DispatchQueue.main.async { self?.commandField.stringValue = result.bestTranscription.formattedString }
-                if result.isFinal {
-                    DispatchQueue.main.async { self?.sendCommand() }
-                    self?.stopVoiceRecognition()
+            DispatchQueue.main.async {
+                guard let self, self.voiceSession == session else { return }
+                if let result {
+                    self.voiceTranscript = result.bestTranscription.formattedString
+                    self.commandField.stringValue = self.voiceTranscript
+                    self.armVoiceTimer(after: 1.5)
+                    if result.isFinal { self.teardownVoice(send: true); return }
+                }
+                if let error {
+                    if self.voiceTranscript.isEmpty { self.appendOutput("Voice error: \(error.localizedDescription)") }
+                    self.teardownVoice(send: !self.voiceTranscript.isEmpty)
                 }
             }
-            if error != nil { self?.stopVoiceRecognition() }
         }
         let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1_024, format: format) { [weak request] buffer, _ in request?.append(buffer) }
+        input.installTap(onBus: 0, bufferSize: 1_024, format: input.outputFormat(forBus: 0)) { [weak request] buffer, _ in request?.append(buffer) }
         do {
             try engine.start()
+            micButton.title = "Stop listening"
+            statusLabel.stringValue = "Listening… speak, then pause"
+            statusLabel.textColor = .systemOrange
             appendOutput("Listening… speak a command, then pause.")
+            armVoiceTimer(after: 8)
         } catch {
             appendOutput("Could not start microphone: \(error.localizedDescription)")
-            stopVoiceRecognition()
+            teardownVoice(send: false)
         }
     }
 
-    private func stopVoiceRecognition() {
+    private func armVoiceTimer(after seconds: TimeInterval) {
+        voiceTimer?.invalidate()
+        voiceTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            if self.voiceTranscript.isEmpty { self.appendOutput("Didn’t hear anything."); self.teardownVoice(send: false) }
+            else { self.endVoiceInput() }
+        }
+    }
+
+    // Stops the microphone; the recognizer then delivers its final result, which sends the command.
+    private func endVoiceInput() {
+        voiceTimer?.invalidate()
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        speechRequest?.endAudio()
+        audioEngine = nil
+        micButton.title = "Voice command"
+        statusLabel.stringValue = "Processing speech…"
+        armVoiceTimer(after: 4)
+    }
+
+    private func teardownVoice(send: Bool) {
+        voiceSession += 1
+        voiceTimer?.invalidate()
         audioEngine?.stop()
         audioEngine?.inputNode.removeTap(onBus: 0)
         speechRequest?.endAudio()
@@ -378,6 +426,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioEngine = nil
         speechRequest = nil
         recognitionTask = nil
+        micButton?.title = "Voice command"
+        statusLabel?.stringValue = "Backend connected"
+        statusLabel?.textColor = .systemGreen
+        let transcript = voiceTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        voiceTranscript = ""
+        if send, !transcript.isEmpty {
+            commandField.stringValue = transcript
+            sendCommand()
+        }
     }
 
     private func backendURL() -> URL? {
