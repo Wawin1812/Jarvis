@@ -33,12 +33,14 @@ export function createModelAgents(
   agentStatus?: () => string[],
   fastModel?: string,
   fastChat = false,
+  openEnabled = false,
 ): JarvisAgentDefinition[] {
   const capabilities = new Set<JarvisCapability>(filesEnabled ? ['chat', 'files.read'] : ['chat']);
   const coordinatorCapabilities = new Set<JarvisCapability>(capabilities);
   if (writeEnabled) coordinatorCapabilities.add('files.write');
   if (webEnabled) coordinatorCapabilities.add('browser.read');
   if (memory) coordinatorCapabilities.add('memory.write');
+  if (openEnabled) coordinatorCapabilities.add('browser.interact');
 
   // The researcher is only useful (and only created) when web access is on.
   const ids = SPECIALIST_IDS.filter((id) => id !== 'researcher' || webEnabled);
@@ -61,12 +63,13 @@ export function createModelAgents(
       filesEnabled,
       writeEnabled,
       webEnabled,
+      openEnabled,
       ...(memory ? { memory } : {}),
       ...(agentStatus ? { agentStatus, canDispatch: true } : {}),
       fastChat,
       ...(fastModel ? { fastModel } : {}),
       delegateTo: ids,
-      role: 'JARVIS, a warm, concise personal AI assistant and the control unit for a team of specialist agents. You talk with the user by voice. Answer directly when you can, use your tools to get things done, and hand work to the right specialist: frontend-engineer, backend-engineer or security-reviewer for code, researcher for web lookups.',
+      role: 'JARVIS, a warm, concise personal AI assistant and the control unit for a team of specialist agents. You talk with the user by voice. Answer directly when you can and use your own tools to get things done. Hand work to a specialist only for code review (frontend-engineer, backend-engineer, security-reviewer) or web lookups (researcher); never for anything else.',
     }),
   };
 

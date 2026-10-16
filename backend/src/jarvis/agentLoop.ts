@@ -9,6 +9,8 @@ export interface AgentLoopOptions {
   filesEnabled: boolean;
   writeEnabled?: boolean;
   webEnabled?: boolean;
+  /** Lets this agent open websites and allow-listed apps on the user's Mac. */
+  openEnabled?: boolean;
   /** Returns notes the user previously asked JARVIS to remember; enables the remember/forget actions. */
   memory?: () => string[];
   delegateTo?: readonly JarvisAgentId[];
@@ -28,6 +30,7 @@ type Action =
   | { action: 'files.write'; path: string; content: string; overwrite: boolean }
   | { action: 'web.search'; query: string }
   | { action: 'web.fetch'; url: string }
+  | { action: 'open'; app?: string; url?: string }
   | { action: 'remember'; note: string }
   | { action: 'forget'; note: string }
   | { action: 'delegate'; agent: string; goal: string }
@@ -45,6 +48,9 @@ function buildInstruction(options: AgentLoopOptions): string {
   }
   if (options.webEnabled) {
     actions.push('{"action":"web.search","query":"<search terms>"}', '{"action":"web.fetch","url":"<https URL of a page to read>"}');
+  }
+  if (options.openEnabled) {
+    actions.push('{"action":"open","app":"<optional: Firefox, Safari, Chrome, Mail, Calendar, Notes, Music, Messages, Finder, Maps, Photos or Reminders>","url":"<optional https address, e.g. https://mail.google.com for Gmail>"}');
   }
   if (options.memory) {
     actions.push('{"action":"remember","note":"<one short fact about the user to keep>"}', '{"action":"forget","note":"<words identifying the note to delete>"}');
@@ -65,6 +71,10 @@ function buildInstruction(options: AgentLoopOptions): string {
     '- Use the exact file names the user gives. If a read fails or you do not know a file name, read "." to list the folder, then retry. Never ask the user for a path.',
     '- A human must approve every file read; if a read is refused, say so instead of guessing the contents.',
     `- Only claim what the observations actually show. You cannot run commands${options.writeEnabled ? '' : ' or modify files'}${options.webEnabled ? '' : ' or browse the web'}; use only the actions listed above. For current events or facts you are unsure of, ${options.webEnabled ? 'use web.search and answer from the result summaries; call web.fetch only if they do not contain the answer' : 'say you cannot look them up'}.`,
+    ...(options.openEnabled
+      ? ['- To open a website or app, use "open" (Gmail is https://mail.google.com, YouTube is https://www.youtube.com). Opening only launches it: you cannot sign in, read pages or emails, or click anything, and you must never ask for or handle passwords. After opening, say it is open and the user takes over.']
+      : ['- You cannot open apps or websites on the computer; if asked, say so plainly and suggest the user does it.']),
+    ...(options.delegateTo?.length ? ['- Specialists only review code or look things up on the web. They cannot operate the computer, so never hand them tasks like opening apps, browsing, email or general requests; if you have no action for a request, say plainly that you cannot do it (for example booking, buying, paying, sending messages, calling) and offer what you can do instead, such as opening a website.'] : []),
     '- Use "final" as soon as you can answer.',
     ...(options.memory ? ['- Use "remember" only when the user asks you to remember something.'] : []),
     ...(options.canDispatch ? [
@@ -87,9 +97,10 @@ const FAST_INSTRUCTION = [
   'You are JARVIS, a warm, quick personal assistant talking with the user by voice.',
   'Answer in one to three short, natural spoken sentences. No markdown, lists or URLs. Use the facts in the context.',
   'If the question needs a file, the web, current events, or anything you cannot answer confidently from what you know, reply with exactly: NEEDS_TOOLS',
+  'In this mode you can only talk. Never say you are doing, checking, booking, buying, sending, opening or looking something up. If the user asks you to DO anything (an errand, an action, a task), reply with exactly: NEEDS_TOOLS',
 ].join('\n');
 
-const TOOL_WORDS = /\b(file|files|folder|directory|workspace|read|open|write|save|create|search|look ?up|google|web|website|internet|online|news|latest|current|currently|weather|forecast|price|score|stock|remember|forget|background|assign|dispatch|agent|agents|reviewer|engineer|researcher|review|audit|code|summari[sz]e|fetch|download)\b|\.(txt|md|json|ts|js|swift)\b/i;
+const TOOL_WORDS = /\b(file|files|folder|directory|workspace|read|open|launch|start|run|browser|firefox|safari|chrome|gmail|email|mail|calendar|app|application|write|save|create|search|look ?up|google|web|website|internet|online|news|latest|current|currently|weather|forecast|price|score|stock|remember|forget|background|assign|dispatch|agent|agents|reviewer|engineer|researcher|review|audit|code|summari[sz]e|fetch|download|book|buy|order|send|schedule|play|reserve|remind)\b|\.(txt|md|json|ts|js|swift)\b/i;
 
 function requestText(goal: string): string {
   const marker = 'New request: ';
@@ -161,6 +172,9 @@ function parseAction(raw: string): Action {
     if (value.action === 'forget' && typeof value.note === 'string') return { action: 'forget', note: value.note };
     if (value.action === 'web.search' && typeof value.query === 'string') return { action: 'web.search', query: value.query };
     if (value.action === 'web.fetch' && typeof value.url === 'string') return { action: 'web.fetch', url: value.url };
+    if (value.action === 'open' && (typeof value.app === 'string' || typeof value.url === 'string')) {
+      return { action: 'open', ...(typeof value.app === 'string' && value.app ? { app: value.app } : {}), ...(typeof value.url === 'string' && value.url ? { url: value.url } : {}) };
+    }
     if (value.action === 'delegate' && typeof value.agent === 'string' && typeof value.goal === 'string') {
       return { action: 'delegate', agent: value.agent, goal: value.goal };
     }
@@ -233,6 +247,12 @@ export async function runAgentLoop(context: JarvisAgentContext, options: AgentLo
         ? await context.requestTool({ capability: 'browser.read', input: action.action === 'web.search' ? { query: action.query } : { url: action.url } })
         : { ok: false, error: 'Web access is not enabled.' };
       observation = result.ok ? String(result.output) : `Error: ${result.error}`;
+    } else if (action.action === 'open') {
+      const result = options.openEnabled
+        ? await context.requestTool({ capability: 'browser.interact', input: { app: action.app, url: action.url } })
+        : { ok: false, error: 'Opening apps is not enabled.' };
+      observation = result.ok ? String(result.output) : `Error: ${result.error}`;
+      if (result.ok) return { summary: `Done. ${action.app ?? 'Your browser'}${action.url ? ` is opening ${new URL(action.url).hostname}` : ' is open'}. I can't sign in or click for you, so take it from there.`, completed: true, stepsUsed };
     } else if (action.action === 'remember' || action.action === 'forget') {
       const result = options.memory
         ? await context.requestTool({ capability: 'memory.write', input: action.action === 'remember' ? { remember: action.note } : { forget: action.note } })

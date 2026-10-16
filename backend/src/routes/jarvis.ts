@@ -20,7 +20,7 @@ export function createJarvisRouter(runtime: JarvisRuntime, apiToken: string | un
     res.json({
       status: 'ready',
       privilegedToolsEnabled: runtime.filesEnabled,
-      tools: [...(runtime.filesEnabled ? ['files.read'] : []), ...(runtime.writeEnabled ? ['files.write'] : []), ...(runtime.webEnabled ? ['web.search', 'web.fetch'] : [])],
+      tools: [...(runtime.filesEnabled ? ['files.read'] : []), ...(runtime.writeEnabled ? ['files.write'] : []), ...(runtime.webEnabled ? ['web.search', 'web.fetch'] : []), ...(process.env.JARVIS_OPEN === 'true' ? ['open'] : [])],
       agents: runtime.agentIds,
       model: runtime.model ? { provider: runtime.model.provider, name: runtime.model.model } : null,
       persistentAudit: runtime.persistentAudit,
