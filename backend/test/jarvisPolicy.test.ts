@@ -26,14 +26,10 @@ describe('JARVIS policy gateway', () => {
     expect(decision.allowed).to.equal(false);
   });
 
-  it('keeps external sending and persistent memory disabled initially', () => {
-    for (const capability of ['external.send', 'memory.write'] as const) {
-      expect(decideJarvisPolicy({
-        capability,
-        approved: true,
-        approvalId: 'approval-1',
-      }).allowed).to.equal(false);
-    }
+  it('keeps external sending disabled and requires approval for memory', () => {
+    expect(decideJarvisPolicy({ capability: 'external.send', approved: true, approvalId: 'approval-1' }).allowed).to.equal(false);
+    expect(decideJarvisPolicy({ capability: 'memory.write', approved: false }).allowed).to.equal(false);
+    expect(decideJarvisPolicy({ capability: 'memory.write', approved: true, approvalId: 'approval-1' }).allowed).to.equal(true);
   });
 
   it('allows an approved, non-disabled capability', () => {

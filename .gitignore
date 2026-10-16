@@ -16,3 +16,6 @@ desktop-macos/.swiftpm/
 
 workspace/
 .run/
+
+# Local runtime data (encrypted audit log, personal memory)
+backend/data/

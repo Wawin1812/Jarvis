@@ -40,7 +40,7 @@ export function decideJarvisPolicy(request: PolicyRequest): PolicyDecision {
     return { allowed: false, reason: 'Screen capture requires an active capture session.' };
   }
 
-  if (request.capability === 'external.send' || request.capability === 'memory.write') {
+  if (request.capability === 'external.send') {
     return { allowed: false, reason: 'Capability is disabled in the initial release.' };
   }
 

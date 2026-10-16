@@ -9,6 +9,8 @@ export interface AgentLoopOptions {
   filesEnabled: boolean;
   writeEnabled?: boolean;
   webEnabled?: boolean;
+  /** Returns notes the user previously asked JARVIS to remember; enables the remember/forget actions. */
+  memory?: () => string[];
   delegateTo?: readonly JarvisAgentId[];
 }
 
@@ -18,6 +20,8 @@ type Action =
   | { action: 'files.write'; path: string; content: string; overwrite: boolean }
   | { action: 'web.search'; query: string }
   | { action: 'web.fetch'; url: string }
+  | { action: 'remember'; note: string }
+  | { action: 'forget'; note: string }
   | { action: 'delegate'; agent: string; goal: string };
 
 function buildInstruction(options: AgentLoopOptions): string {
@@ -31,11 +35,17 @@ function buildInstruction(options: AgentLoopOptions): string {
   if (options.webEnabled) {
     actions.push('{"action":"web.search","query":"<search terms>"}', '{"action":"web.fetch","url":"<https URL of a page to read>"}');
   }
+  if (options.memory) {
+    actions.push('{"action":"remember","note":"<one short fact about the user to keep>"}', '{"action":"forget","note":"<words identifying the note to delete>"}');
+  }
   if (options.delegateTo?.length) {
     actions.push(`{"action":"delegate","agent":"<one of: ${options.delegateTo.join(', ')}>","goal":"<self-contained subtask>"}`);
   }
   return [
     `You are ${options.role}`,
+    `Current date and time: ${new Date().toLocaleString('en-AU', { dateStyle: 'full', timeStyle: 'short' })}.`,
+    'Your replies are spoken aloud: answer in short, natural sentences, without markdown, lists, code fences or raw URLs.',
+    ...(options.memory ? [`What you know about the user (their own notes):${options.memory().map((note) => `\n- ${note}`).join('') || ' nothing yet.'}`, 'Use "remember" only when the user asks you to remember something.'] : []),
     'Reply with exactly one JSON object per turn, using one of these actions:',
     ...actions,
     'Rules:',
@@ -85,6 +95,8 @@ function parseAction(raw: string): Action {
     if (value.action === 'files.write' && typeof value.path === 'string' && typeof value.content === 'string') {
       return { action: 'files.write', path: value.path, content: value.content, overwrite: value.overwrite === true };
     }
+    if (value.action === 'remember' && typeof value.note === 'string') return { action: 'remember', note: value.note };
+    if (value.action === 'forget' && typeof value.note === 'string') return { action: 'forget', note: value.note };
     if (value.action === 'web.search' && typeof value.query === 'string') return { action: 'web.search', query: value.query };
     if (value.action === 'web.fetch' && typeof value.url === 'string') return { action: 'web.fetch', url: value.url };
     if (value.action === 'delegate' && typeof value.agent === 'string' && typeof value.goal === 'string') {
@@ -143,6 +155,11 @@ export async function runAgentLoop(context: JarvisAgentContext, options: AgentLo
       const result = options.webEnabled
         ? await context.requestTool({ capability: 'browser.read', input: action.action === 'web.search' ? { query: action.query } : { url: action.url } })
         : { ok: false, error: 'Web access is not enabled.' };
+      observation = result.ok ? String(result.output) : `Error: ${result.error}`;
+    } else if (action.action === 'remember' || action.action === 'forget') {
+      const result = options.memory
+        ? await context.requestTool({ capability: 'memory.write', input: action.action === 'remember' ? { remember: action.note } : { forget: action.note } })
+        : { ok: false, error: 'Memory is not enabled.' };
       observation = result.ok ? String(result.output) : `Error: ${result.error}`;
     } else if (context.delegate && options.delegateTo?.includes(action.agent as JarvisAgentId)) {
       const remaining = maxSteps - stepsUsed;

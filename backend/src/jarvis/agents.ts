@@ -20,11 +20,12 @@ const SPECIALISTS: Record<(typeof SPECIALIST_IDS)[number], { description: string
   },
 };
 
-export function createModelAgents(model: JarvisModelClient, filesEnabled: boolean, writeEnabled = false, webEnabled = false): JarvisAgentDefinition[] {
+export function createModelAgents(model: JarvisModelClient, filesEnabled: boolean, writeEnabled = false, webEnabled = false, memory?: () => string[]): JarvisAgentDefinition[] {
   const capabilities = new Set<JarvisCapability>(filesEnabled ? ['chat', 'files.read'] : ['chat']);
   const coordinatorCapabilities = new Set<JarvisCapability>(capabilities);
   if (writeEnabled) coordinatorCapabilities.add('files.write');
   if (webEnabled) coordinatorCapabilities.add('browser.read');
+  if (memory) coordinatorCapabilities.add('memory.write');
 
   const specialists = SPECIALIST_IDS.map((id): JarvisAgentDefinition => ({
     id,
@@ -42,8 +43,9 @@ export function createModelAgents(model: JarvisModelClient, filesEnabled: boolea
       filesEnabled,
       writeEnabled,
       webEnabled,
+      ...(memory ? { memory } : {}),
       delegateTo: SPECIALIST_IDS,
-      role: 'JARVIS, a local personal assistant. Answer directly when you can; delegate to a specialist for code review or security review.',
+      role: 'JARVIS, a warm, concise personal AI assistant who talks with the user by voice. Answer directly when you can, use your tools to get things done, and delegate to a specialist for code review or security review.',
     }),
   };
 

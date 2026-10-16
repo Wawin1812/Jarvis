@@ -10,7 +10,7 @@ private let keychainService = "com.jarvis.desktop"
 private let keychainAccount = "api-token"
 
 @main
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDelegate {
     private var window: NSWindow!
     private var statusLabel: NSTextField!
     private var backendField: NSTextField!
@@ -30,7 +30,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var promptingApproval = false
     private var speakCheckbox: NSButton!
     private let synthesizer = AVSpeechSynthesizer()
-    private var spokenCount = 0
+    private struct TaskWatch { var background: Bool; var label: String; var request: String; var spoken: Int }
+    private var watches: [String: TaskWatch] = [:]
+    private var history: [(user: String, jarvis: String)] = []
+    private var backgroundCheckbox: NSButton!
+    private var conversationCheckbox: NSButton!
     private var pollTick = 0
 
     static func main() {
@@ -41,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        synthesizer.delegate = self
         NSApp.setActivationPolicy(.regular)
         buildWindow()
         loadConfiguration()
@@ -95,7 +100,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let commandStack = horizontalStack([commandField, sendButton])
         speakCheckbox = NSButton(checkboxWithTitle: "Speak replies aloud", target: nil, action: nil)
         speakCheckbox.state = .on
-        let mainStack = verticalStack([title, subtitle, statusLabel, separator(), configStack, separator(), commandStack, speakCheckbox, scroll], spacing: 10)
+        backgroundCheckbox = NSButton(checkboxWithTitle: "Run tasks in the background", target: nil, action: nil)
+        conversationCheckbox = NSButton(checkboxWithTitle: "Hands-free conversation (say “goodbye” to stop)", target: self, action: #selector(conversationToggled))
+        let mainStack = verticalStack([title, subtitle, statusLabel, separator(), configStack, separator(), commandStack, speakCheckbox, backgroundCheckbox, conversationCheckbox, scroll], spacing: 10)
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(mainStack)
 
@@ -165,71 +172,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func sendCommand() {
-        let goal = commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !goal.isEmpty else { return }
+        let raw = commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
         guard tokenField.stringValue.count >= 32 else {
             showError("Configure the JARVIS API token first.")
             return
         }
-        sendButton.isEnabled = false
-        appendOutput("You: \(goal)")
-        let body: [String: Any] = ["goal": goal]
-        request(path: "/api/jarvis/tasks/async", method: "POST", body: body) { [weak self] result in
+        if raw.range(of: #"^(stop listening|goodbye|good bye|that'?s all|stop conversation)\.?$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            conversationCheckbox.state = .off
+            commandField.stringValue = ""
+            appendOutput("JARVIS: conversation mode off.")
+            speak("Okay, I will stop listening.")
+            return
+        }
+        let (request, spokenBackground) = Self.splitBackground(raw)
+        let background = backgroundCheckbox.state == .on || spokenBackground
+        appendOutput("You: \(raw)")
+        commandField.stringValue = ""
+        synthesizer.stopSpeaking(at: .immediate)
+        if !background { sendButton.isEnabled = false }
+        let past = history.suffix(3).map { "User: \($0.user)\nJARVIS: \($0.jarvis)" }.joined(separator: "\n")
+        let goal = past.isEmpty ? request : "Earlier in this conversation:\n\(String(past.suffix(2_500)))\n\nNew request: \(request)"
+        self.request(path: "/api/jarvis/tasks/async", method: "POST", body: ["goal": goal]) { [weak self] result in
             DispatchQueue.main.async {
-                self?.commandField.stringValue = ""
+                guard let self else { return }
                 switch result {
                 case .success(let data):
                     guard let id = Self.json(data)?["id"] as? String else {
-                        self?.sendButton.isEnabled = true
-                        self?.appendOutput("JARVIS error: unexpected response \(data)")
+                        self.sendButton.isEnabled = true
+                        self.appendOutput("JARVIS error: unexpected response \(data)")
                         return
                     }
-                    self?.pollTask(id)
+                    self.watches[id] = TaskWatch(background: background, label: String(request.prefix(60)), request: request, spoken: 0)
+                    if background {
+                        self.appendOutput("JARVIS: on it, working in the background.")
+                        self.speak("On it. I will tell you when it is done.")
+                    }
+                    self.startPolling()
                 case .failure(let error):
-                    self?.sendButton.isEnabled = true
-                    self?.appendOutput("JARVIS error: \(error.localizedDescription)")
+                    self.sendButton.isEnabled = true
+                    self.appendOutput("JARVIS error: \(error.localizedDescription)")
+                    self.speak("Sorry, something went wrong.")
                 }
             }
         }
+    }
+
+    // "in the background, do X" / "do X in the background" -> background task.
+    private static func splitBackground(_ text: String) -> (String, Bool) {
+        let lead = #"^(?:please\s+)?(?:in the background|background)[,:]?\s+"#
+        let tail = #"[,\s]+in the background\.?$"#
+        for pattern in [lead, tail] {
+            if let range = text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
+                var copy = text
+                copy.removeSubrange(range)
+                return (copy, true)
+            }
+        }
+        return (text, false)
     }
 
     private static func json(_ text: String) -> [String: Any]? {
         (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
     }
 
-    private func pollTask(_ id: String) {
-        pollTimer?.invalidate()
-        spokenCount = 0
+    private func startPolling() {
+        guard pollTimer == nil else { return }
         pollTick = 0
-        synthesizer.stopSpeaking(at: .immediate)
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-            self?.pollOnce(id)
+            self?.pollAll()
         }
     }
 
-    private func finishTask(_ message: String) {
-        pollTimer?.invalidate()
-        pollTimer = nil
-        sendButton.isEnabled = true
-        appendOutput(message)
-    }
+    private var foregroundBusy: Bool { watches.values.contains { !$0.background } }
 
-    // Speaks each completed sentence once; `final` also speaks the unfinished tail.
-    private func speakNewSentences(_ text: String, final: Bool) {
-        guard speakCheckbox.state == .on, text.count > spokenCount else { return }
-        let pending = String(text.dropFirst(spokenCount))
-        var chunk = pending
-        if !final {
-            let marks = [". ", "! ", "? ", "\n"].compactMap { pending.range(of: $0, options: .backwards)?.upperBound }
-            guard let end = marks.max() else { return }
-            chunk = String(pending[..<end])
+    private func pollAll() {
+        guard !watches.isEmpty else {
+            pollTimer?.invalidate()
+            pollTimer = nil
+            return
         }
-        spokenCount += chunk.count
-        let spoken = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !spoken.isEmpty { synthesizer.speak(AVSpeechUtterance(string: String(spoken.prefix(1_000)))) }
-    }
-
-    private func pollOnce(_ id: String) {
         pollTick += 1
         if pollTick % 4 == 1 {
             request(path: "/api/jarvis/approvals", method: "GET", body: nil) { [weak self] result in
@@ -237,25 +259,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { self?.promptForApprovals(list) }
             }
         }
+        for id in watches.keys { pollOnce(id) }
+    }
+
+    // Speaks each completed sentence once; `final` also speaks the unfinished tail.
+    private func speakNewSentences(_ text: String, id: String, final: Bool) {
+        guard var watch = watches[id], text.count > watch.spoken else { return }
+        let pending = String(text.dropFirst(watch.spoken))
+        var chunk = pending
+        if !final {
+            let marks = [". ", "! ", "? ", "\n"].compactMap { pending.range(of: $0, options: .backwards)?.upperBound }
+            guard let end = marks.max() else { return }
+            chunk = String(pending[..<end])
+        }
+        watch.spoken += chunk.count
+        watches[id] = watch
+        speak(chunk)
+    }
+
+    private func speak(_ text: String) {
+        let spoken = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard speakCheckbox.state == .on, !spoken.isEmpty else { return }
+        synthesizer.speak(AVSpeechUtterance(string: String(spoken.prefix(1_000))))
+    }
+
+    // Re-opens the microphone in hands-free mode once JARVIS is done talking and no foreground task is running.
+    private func resumeListening() {
+        guard conversationCheckbox.state == .on, audioEngine == nil, !synthesizer.isSpeaking, !foregroundBusy, !promptingApproval else { return }
+        toggleVoice()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async { [weak self] in self?.resumeListening() }
+    }
+
+    private func pollOnce(_ id: String) {
         request(path: "/api/jarvis/tasks/\(id)", method: "GET", body: nil) { [weak self] result in
             DispatchQueue.main.async {
-                guard let self, self.pollTimer != nil else { return }
+                guard let self, let watch = self.watches[id] else { return }
                 switch result {
                 case .failure(let error):
-                    self.finishTask("JARVIS error: \(error.localizedDescription)")
+                    self.completeTask(id, watch, text: "JARVIS error: \(error.localizedDescription)", spoken: "Sorry, something went wrong.", answer: nil)
                 case .success(let data):
                     guard let task = Self.json(data), let status = task["status"] as? String else { return }
-                    if let partial = task["partial"] as? String { self.speakNewSentences(partial, final: false) }
+                    if !watch.background, let partial = task["partial"] as? String { self.speakNewSentences(partial, id: id, final: false) }
                     if status == "completed" {
                         let summary = (task["result"] as? [String: Any])?["summary"] as? String ?? data
-                        self.finishTask("JARVIS: \(summary)")
-                        self.speakNewSentences(summary, final: true)
+                        if watch.background {
+                            self.completeTask(id, watch, text: "Background task finished (\(watch.label)): \(summary)", spoken: "Your background task is done. \(summary)", answer: nil)
+                        } else {
+                            self.completeTask(id, watch, text: "JARVIS: \(summary)", spoken: nil, answer: summary)
+                        }
                     } else if status == "failed" {
-                        self.finishTask("JARVIS error: \(task["error"] as? String ?? "task failed")")
+                        let reason = task["error"] as? String ?? "task failed"
+                        self.completeTask(id, watch, text: "JARVIS error: \(reason)", spoken: "Sorry, \(reason)", answer: nil)
                     }
                 }
             }
         }
+    }
+
+    private func completeTask(_ id: String, _ watch: TaskWatch, text: String, spoken: String?, answer: String?) {
+        guard watches[id] != nil else { return }
+        if !watch.background { speakNewSentences(answer ?? "", id: id, final: true) }
+        watches[id] = nil
+        if !watch.background { sendButton.isEnabled = true }
+        appendOutput(text)
+        if let answer { history = Array((history + [(watch.request, answer)]).suffix(3)) }
+        if let spoken { speak(spoken) }
+        if watches.isEmpty { pollTimer?.invalidate(); pollTimer = nil }
+        if !synthesizer.isSpeaking { resumeListening() }
     }
 
     private func promptForApprovals(_ approvals: [[String: Any]]) {
@@ -277,6 +350,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { self?.appendOutput("Approval error: \(error.localizedDescription)") }
             }
         }
+    }
+
+    @objc private func conversationToggled() {
+        if conversationCheckbox.state == .on { resumeListening() } else if audioEngine != nil { teardownVoice(send: false) }
     }
 
     @objc private func toggleVoice() {
@@ -376,6 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 if let error {
                     if self.voiceTranscript.isEmpty {
+                        self.conversationCheckbox.state = .off
                         let message = error.localizedDescription
                         self.appendOutput(message.contains("Dictation") ? "Voice needs macOS Dictation. Turn it on in System Settings → Keyboard → Dictation, then try again." : "Voice error: \(message)")
                     }
@@ -402,7 +480,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         voiceTimer?.invalidate()
         voiceTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
             guard let self else { return }
-            if self.voiceTranscript.isEmpty { self.appendOutput("Didn’t hear anything."); self.teardownVoice(send: false) }
+            if self.voiceTranscript.isEmpty {
+                let handsFree = self.conversationCheckbox.state == .on
+                if !handsFree { self.appendOutput("Didn’t hear anything.") }
+                self.teardownVoice(send: false)
+                if handsFree { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.resumeListening() } }
+            }
             else { self.endVoiceInput() }
         }
     }

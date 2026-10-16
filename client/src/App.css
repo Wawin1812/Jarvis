@@ -31,3 +31,7 @@ header p { color: #94a3b8; font-size: 1.1rem; }
 .approval-input { word-break: break-all; color: #fcd34d; }
 .approval-actions { display: flex; gap: 0.5rem; }
 .approval-actions .deny { background: #991b1b; }
+
+.jarvis-toggles { display: flex; flex-direction: column; gap: 4px; }
+.jarvis-tasks { list-style: none; margin: 8px 0; padding: 0; font-size: 0.85rem; }
+.jarvis-tasks li { padding: 4px 0; border-bottom: 1px solid rgba(128, 128, 128, 0.25); }

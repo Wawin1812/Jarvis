@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 
 const DEFAULT_API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:3002';
 
+type SpeechRecognitionEvent = { results: ArrayLike<ArrayLike<{ transcript: string }>> };
+
 type SpeechRecognitionResult = {
-  results: ArrayLike<ArrayLike<{ transcript: string }>>;
-  onresult: ((event: SpeechRecognitionResult) => void) | null;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
   onend: (() => void) | null;
-  onerror: (() => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
   start: () => void;
   stop: () => void;
 };
@@ -21,6 +22,18 @@ declare global {
 }
 
 type PendingApproval = { id: string; agentId: string; capability: string; summary: string };
+type BackgroundTask = { id: string; label: string; status: 'running' | 'completed' | 'failed'; summary?: string };
+
+const STOP_PHRASES = /^(stop listening|goodbye|good bye|that'?s all|stop conversation)\.?$/i;
+
+// "in the background, do X" / "do X in the background" -> background task.
+function splitBackground(text: string): { goal: string; background: boolean } {
+  const lead = /^(?:please\s+)?(?:in the background|background)[,:]?\s+/i;
+  const tail = /[,\s]+in the background\.?$/i;
+  if (lead.test(text)) return { goal: text.replace(lead, ''), background: true };
+  if (tail.test(text)) return { goal: text.replace(tail, ''), background: true };
+  return { goal: text, background: false };
+}
 
 export function JarvisPanel() {
   const [apiBase, setApiBase] = useState(DEFAULT_API);
@@ -37,15 +50,65 @@ export function JarvisPanel() {
   const [agents, setAgents] = useState<string[]>(['coordinator']);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [speakReplies, setSpeakReplies] = useState(true);
+  const [runInBackground, setRunInBackground] = useState(false);
+  const [conversation, setConversation] = useState(false);
   const [phase, setPhase] = useState('');
   const [live, setLive] = useState('');
-  const spokenRef = useRef(0);
-  const historyRef = useRef<{ user: string; jarvis: string }[]>([]);
+  const [bgTasks, setBgTasks] = useState<BackgroundTask[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const speechRef = useRef<SpeechRecognitionResult | null>(null);
+  const spokenRef = useRef(0);
+  const historyRef = useRef<{ user: string; jarvis: string }[]>([]);
+  const conversationRef = useRef(false);
+  const busyRef = useRef(false);
+  const heardRef = useRef(false);
+  const speakRef = useRef(true);
+  const sendRef = useRef<(text?: string) => Promise<void>>(async () => undefined);
+
+  speakRef.current = speakReplies;
+  conversationRef.current = conversation;
 
   useEffect(() => () => stopScreenCapture(), []);
+
+  // Poll background tasks (and any approval they need) while some are still running.
+  const hasRunning = bgTasks.some((task) => task.status === 'running');
+  useEffect(() => {
+    if (!hasRunning || !token.trim()) return undefined;
+    const timer = setInterval(async () => {
+      try {
+        const running = bgTasks.filter((task) => task.status === 'running');
+        const updates = await Promise.all(running.map(async (task) => {
+          const response = await api(`/tasks/${task.id}`);
+          return response.ok ? { id: task.id, data: await response.json() } : null;
+        }));
+        const finished: BackgroundTask[] = [];
+        for (const entry of updates) {
+          if (!entry || (entry.data.status !== 'completed' && entry.data.status !== 'failed')) continue;
+          const task = running.find((item) => item.id === entry.id) as BackgroundTask;
+          finished.push({
+            ...task,
+            status: entry.data.status,
+            summary: entry.data.status === 'completed' ? entry.data.result?.summary ?? 'Done.' : entry.data.error ?? 'Task failed.',
+          });
+        }
+        if (finished.length) {
+          setBgTasks((current) => current.map((task) => finished.find((done) => done.id === task.id) ?? task));
+          finished.forEach((task) => {
+            setMessages((current) => [...current, `Background task ${task.status === 'completed' ? 'finished' : 'failed'} (${task.label}): ${task.summary}`]);
+            speakNow(task.status === 'completed' ? `Your background task is done. ${task.summary}` : `A background task failed. ${task.summary}`);
+          });
+        }
+        if (!busyRef.current) {
+          const response = await api('/approvals');
+          if (response.ok) setApprovals((await response.json()).approvals ?? []);
+        }
+      } catch {
+        // Transient polling errors are retried on the next tick.
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  });
 
   async function checkBackend() {
     try {
@@ -76,20 +139,83 @@ export function JarvisPanel() {
     await api(`/approvals/${id}`, { method: 'POST', body: JSON.stringify({ approve }) });
   }
 
+  function withHistory(request: string) {
+    const past = historyRef.current.map((turn) => `User: ${turn.user}\nJARVIS: ${turn.jarvis}`).join('\n').slice(-2_500);
+    return past ? `Earlier in this conversation:\n${past}\n\nNew request: ${request}` : request;
+  }
+
+  // Queues speech after anything already playing; `onDone` fires when it ends (or immediately if nothing is spoken).
+  function speakNow(text: string, onDone?: () => void) {
+    if (!speakRef.current || !('speechSynthesis' in window) || !text.trim()) {
+      onDone?.();
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(text.trim().slice(0, 1_000));
+    if (onDone) {
+      utterance.onend = onDone;
+      utterance.onerror = onDone;
+    }
+    window.speechSynthesis.speak(utterance);
+  }
+
+  // Speaks each completed sentence once; `final` also speaks the unfinished tail and then re-opens the mic.
+  function speakNewSentences(text: string, final: boolean) {
+    const pending = text.slice(spokenRef.current);
+    const ends = ['. ', '! ', '? ', '\n'].map((mark) => (pending.lastIndexOf(mark) < 0 ? 0 : pending.lastIndexOf(mark) + mark.length));
+    const complete = final ? pending : pending.slice(0, Math.max(...ends));
+    spokenRef.current += complete.length;
+    if (final) speakNow(complete, resumeListening);
+    else speakNow(complete);
+  }
+
+  function resumeListening() {
+    if (conversationRef.current && !busyRef.current && !speechRef.current) startListening();
+  }
+
   async function sendCommand(text?: string) {
-    const trimmedGoal = (text ?? goal).trim();
-    if (!trimmedGoal || !token.trim()) {
+    const raw = (text ?? goal).trim();
+    if (!raw || !token.trim()) {
       setMessages((current) => [...current, 'JARVIS: enter a command and API token first.']);
       return;
     }
+    if (STOP_PHRASES.test(raw)) {
+      setConversation(false);
+      conversationRef.current = false;
+      setMessages((current) => [...current, 'JARVIS: conversation mode off.']);
+      speakNow('Okay, I will stop listening.');
+      setGoal('');
+      return;
+    }
+    const parsed = splitBackground(raw);
+    const background = runInBackground || parsed.background;
+    const request = parsed.goal;
+    setMessages((current) => [...current, `You: ${raw}`]);
+    window.speechSynthesis?.cancel();
+
+    if (background) {
+      try {
+        const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: withHistory(request), agentId: agent }) });
+        const task = await response.json();
+        if (!response.ok) throw new Error(task.error || `HTTP ${response.status}`);
+        setBgTasks((current) => [{ id: task.id, label: request.slice(0, 60), status: 'running' as const }, ...current].slice(0, 10));
+        setMessages((current) => [...current, 'JARVIS: on it, working in the background.']);
+        setGoal('');
+        speakNow('On it. I will tell you when it is done.', resumeListening);
+      } catch (error) {
+        setMessages((current) => [...current, `JARVIS error: ${error instanceof Error ? error.message : 'request failed'}`]);
+        resumeListening();
+      }
+      return;
+    }
+
     setBusy(true);
+    busyRef.current = true;
     setPhase('Thinking…');
     setLive('');
     spokenRef.current = 0;
-    window.speechSynthesis?.cancel();
-    setMessages((current) => [...current, `You: ${trimmedGoal}`]);
+    let spokeAnswer = false;
     try {
-      const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: withHistory(trimmedGoal), agentId: agent }) });
+      const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: withHistory(request), agentId: agent }) });
       let task = await response.json();
       if (!response.ok) throw new Error(task.error || `HTTP ${response.status}`);
       let tick = 0;
@@ -114,32 +240,77 @@ export function JarvisPanel() {
       if (task.status === 'failed') throw new Error(task.error || 'Task failed.');
       const answer: string = task.result?.summary || JSON.stringify(task);
       setMessages((current) => [...current, `${agent}: ${answer}`]);
-      historyRef.current = [...historyRef.current, { user: trimmedGoal, jarvis: answer }].slice(-3);
+      historyRef.current = [...historyRef.current, { user: request, jarvis: answer }].slice(-3);
       speakNewSentences(answer, true);
+      spokeAnswer = true;
       setGoal('');
     } catch (error) {
-      setMessages((current) => [...current, `JARVIS error: ${error instanceof Error ? error.message : 'request failed'}`]);
+      const message = error instanceof Error ? error.message : 'request failed';
+      setMessages((current) => [...current, `JARVIS error: ${message}`]);
+      speakNow(`Sorry, something went wrong. ${message}`, resumeListening);
+      spokeAnswer = true;
     } finally {
       setBusy(false);
+      busyRef.current = false;
       setPhase('');
       setLive('');
+      if (!spokeAnswer) resumeListening();
     }
   }
+  sendRef.current = sendCommand;
 
-  function withHistory(request: string) {
-    const past = historyRef.current.map((turn) => `User: ${turn.user}\nJARVIS: ${turn.jarvis}`).join('\n').slice(-2_500);
-    return past ? `Earlier in this conversation:\n${past}\n\nNew request: ${request}` : request;
+  function startListening() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setMessages((current) => [...current, 'Speech recognition is not available in this browser.']);
+      setConversation(false);
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    heardRef.current = false;
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      heardRef.current = true;
+      setGoal(transcript);
+      void sendRef.current(transcript);
+    };
+    recognition.onend = () => {
+      setListening(false);
+      speechRef.current = null;
+      // In conversation mode keep the mic open if nothing was said.
+      if (conversationRef.current && !heardRef.current && !busyRef.current) setTimeout(resumeListening, 300);
+    };
+    recognition.onerror = (event) => {
+      setListening(false);
+      speechRef.current = null;
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        setConversation(false);
+        conversationRef.current = false;
+        setMessages((current) => [...current, 'Microphone or speech service was blocked, so voice is off.']);
+      }
+    };
+    speechRef.current = recognition;
+    setListening(true);
+    recognition.start();
   }
 
-  // Speaks each completed sentence once; `final` also speaks the unfinished tail.
-  function speakNewSentences(text: string, final: boolean) {
-    if (!speakReplies || !('speechSynthesis' in window)) return;
-    const pending = text.slice(spokenRef.current);
-    const ends = ['. ', '! ', '? ', '\\n'].map((mark) => (pending.lastIndexOf(mark) < 0 ? 0 : pending.lastIndexOf(mark) + mark.length));
-    const complete = final ? pending : pending.slice(0, Math.max(...ends));
-    if (!complete.trim()) return;
-    spokenRef.current += complete.length;
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(complete.trim().slice(0, 1_000)));
+  function toggleSpeech() {
+    if (listening) {
+      speechRef.current?.stop();
+      return;
+    }
+    window.speechSynthesis?.cancel();
+    startListening();
+  }
+
+  function toggleConversation(enabled: boolean) {
+    setConversation(enabled);
+    conversationRef.current = enabled;
+    if (enabled && !listening && !busyRef.current) {
+      window.speechSynthesis?.cancel();
+      startListening();
+    }
+    if (!enabled) speechRef.current?.stop();
   }
 
   async function requestMicrophone() {
@@ -201,34 +372,12 @@ export function JarvisPanel() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
       setMessages((current) => [...current, `Screen assistant: ${data.answer}`]);
+      speakNow(data.answer);
     } catch (error) {
       setMessages((current) => [...current, `Screen analysis error: ${error instanceof Error ? error.message : 'request failed'}`]);
     } finally {
       setScreenBusy(false);
     }
-  }
-
-  function toggleSpeech() {
-    if (listening) {
-      speechRef.current?.stop();
-      return;
-    }
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setMessages((current) => [...current, 'Speech recognition is not available in this browser.']);
-      return;
-    }
-    const recognition = new SpeechRecognition();
-    recognition.onresult = (event) => {
-      const transcript = event.results[0][0].transcript;
-      setGoal(transcript);
-      void sendCommand(transcript);
-    };
-    recognition.onend = () => { setListening(false); speechRef.current = null; };
-    recognition.onerror = () => { setListening(false); speechRef.current = null; };
-    speechRef.current = recognition;
-    setListening(true);
-    recognition.start();
   }
 
   return (
@@ -256,9 +405,17 @@ export function JarvisPanel() {
         <button type="button" onClick={() => void sendCommand()} disabled={busy}>{busy ? 'Working…' : 'Send'}</button>
       </div>
       {phase && <p className="jarvis-note" role="status">{phase}</p>}
-      <label className="jarvis-note">
-        <input type="checkbox" checked={speakReplies} onChange={(event) => { setSpeakReplies(event.target.checked); if (!event.target.checked) window.speechSynthesis?.cancel(); }} /> Speak replies aloud
-      </label>
+      <div className="jarvis-toggles">
+        <label className="jarvis-note">
+          <input type="checkbox" checked={speakReplies} onChange={(event) => { setSpeakReplies(event.target.checked); if (!event.target.checked) window.speechSynthesis?.cancel(); }} /> Speak replies aloud
+        </label>
+        <label className="jarvis-note">
+          <input type="checkbox" checked={runInBackground} onChange={(event) => setRunInBackground(event.target.checked)} /> Run tasks in the background
+        </label>
+        <label className="jarvis-note">
+          <input type="checkbox" checked={conversation} onChange={(event) => toggleConversation(event.target.checked)} /> Hands-free conversation (say “goodbye” to stop)
+        </label>
+      </div>
 
       <div className="jarvis-permissions">
         <button type="button" onClick={() => void requestMicrophone()}>Enable microphone</button>
@@ -279,6 +436,13 @@ export function JarvisPanel() {
           </div>
         </div>
       ))}
+      {bgTasks.length > 0 && (
+        <ul className="jarvis-tasks" aria-label="Background tasks">
+          {bgTasks.map((task) => (
+            <li key={task.id}><strong>{task.status === 'running' ? 'Running' : task.status === 'completed' ? 'Done' : 'Failed'}</strong> · {task.label}{task.summary ? ` — ${task.summary.slice(0, 120)}` : ''}</li>
+          ))}
+        </ul>
+      )}
       <pre className="jarvis-output" aria-live="polite">{[...messages, ...(live ? [`${agent}: ${live}…`] : [])].join('\n\n')}</pre>
       <p className="jarvis-note">Screen frames are sent only when you click “Analyze this frame”, and only to the configured backend/model. Microphone audio is not uploaded; browser speech recognition may use the browser’s speech service.</p>
     </section>
