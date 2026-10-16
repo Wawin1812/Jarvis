@@ -19,8 +19,10 @@ const SPECIALISTS: Record<(typeof SPECIALIST_IDS)[number], { description: string
   },
 };
 
-export function createModelAgents(model: JarvisModelClient, filesEnabled: boolean): JarvisAgentDefinition[] {
-  const capabilities = new Set<'chat' | 'files.read'>(filesEnabled ? ['chat', 'files.read'] : ['chat']);
+export function createModelAgents(model: JarvisModelClient, filesEnabled: boolean, writeEnabled = false): JarvisAgentDefinition[] {
+  const capabilities = new Set<'chat' | 'files.read' | 'files.write'>(filesEnabled ? ['chat', 'files.read'] : ['chat']);
+  const coordinatorCapabilities = new Set(capabilities);
+  if (writeEnabled) coordinatorCapabilities.add('files.write');
 
   const specialists = SPECIALIST_IDS.map((id): JarvisAgentDefinition => ({
     id,
@@ -32,10 +34,11 @@ export function createModelAgents(model: JarvisModelClient, filesEnabled: boolea
   const coordinator: JarvisAgentDefinition = {
     id: 'coordinator',
     description: `Local ${model.provider} coordinator using ${model.model}.`,
-    capabilities,
+    capabilities: coordinatorCapabilities,
     run: (context) => runAgentLoop(context, {
       model,
       filesEnabled,
+      writeEnabled,
       delegateTo: SPECIALIST_IDS,
       role: 'JARVIS, a local personal assistant. Answer directly when you can; delegate to a specialist for code review or security review.',
     }),

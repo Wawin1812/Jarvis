@@ -7,18 +7,23 @@ export interface AgentLoopOptions {
   model: JarvisModelClient;
   role: string;
   filesEnabled: boolean;
+  writeEnabled?: boolean;
   delegateTo?: readonly JarvisAgentId[];
 }
 
 type Action =
   | { action: 'final'; answer: string }
   | { action: 'files.read'; path: string }
+  | { action: 'files.write'; path: string; content: string; overwrite: boolean }
   | { action: 'delegate'; agent: string; goal: string };
 
 function buildInstruction(options: AgentLoopOptions): string {
   const actions = ['{"action":"final","answer":"<your reply to the user>"}'];
   if (options.filesEnabled) {
     actions.push('{"action":"files.read","path":"<path relative to the allowed folder, copied exactly from the request; \\".\\" lists the allowed folder>"}');
+  }
+  if (options.writeEnabled) {
+    actions.push('{"action":"files.write","path":"<new file path in the allowed folder>","content":"<full text>","overwrite":false}');
   }
   if (options.delegateTo?.length) {
     actions.push(`{"action":"delegate","agent":"<one of: ${options.delegateTo.join(', ')}>","goal":"<self-contained subtask>"}`);
@@ -41,6 +46,9 @@ function parseAction(raw: string): Action {
     const value = JSON.parse(raw) as Record<string, unknown>;
     if (value.action === 'final' && typeof value.answer === 'string') return { action: 'final', answer: value.answer };
     if (value.action === 'files.read' && typeof value.path === 'string') return { action: 'files.read', path: value.path };
+    if (value.action === 'files.write' && typeof value.path === 'string' && typeof value.content === 'string') {
+      return { action: 'files.write', path: value.path, content: value.content, overwrite: value.overwrite === true };
+    }
     if (value.action === 'delegate' && typeof value.agent === 'string' && typeof value.goal === 'string') {
       return { action: 'delegate', agent: value.agent, goal: value.goal };
     }
@@ -55,6 +63,7 @@ export async function runAgentLoop(context: JarvisAgentContext, options: AgentLo
   const maxSteps = context.task.maxSteps;
   let transcript = `Task: ${context.task.goal}`;
   let stepsUsed = 0;
+  const readPaths = new Set<string>();
 
   while (stepsUsed < maxSteps) {
     stepsUsed += 1;
@@ -64,10 +73,24 @@ export async function runAgentLoop(context: JarvisAgentContext, options: AgentLo
 
     let observation: string;
     if (action.action === 'files.read') {
+      if (readPaths.has(action.path)) {
+        return {
+          summary: `The model requested the same file read again (${action.path}) instead of answering. Try a larger model such as gemma3:4b.`,
+          completed: false,
+          stepsUsed,
+        };
+      }
+      readPaths.add(action.path);
       const result = options.filesEnabled
         ? await context.requestTool({ capability: 'files.read', input: { path: action.path } })
         : { ok: false, error: 'File access is not enabled.' };
       observation = result.ok ? String(result.output) : `Error: ${result.error}`;
+    } else if (action.action === 'files.write') {
+      const result = options.writeEnabled
+        ? await context.requestTool({ capability: 'files.write', input: { path: action.path, content: action.content, overwrite: action.overwrite } })
+        : { ok: false, error: 'File writing is not enabled.' };
+      observation = result.ok ? String(result.output) : `Error: ${result.error}`;
+      if (result.ok) return { summary: observation, completed: true, stepsUsed };
     } else if (context.delegate && options.delegateTo?.includes(action.agent as JarvisAgentId)) {
       const remaining = maxSteps - stepsUsed;
       if (remaining < 1) {

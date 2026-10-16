@@ -147,7 +147,7 @@ describe('JARVIS agent loop', () => {
   });
 
   it('stops at the step budget', async () => {
-    const model = scriptedModel(Array(5).fill('{"action":"files.read","path":"."}'));
+    const model = scriptedModel([1, 2, 3, 4, 5].map((n) => `{"action":"files.read","path":"f${n}.txt"}`));
     const { authority, broker } = build(model, root);
     const run = authority.run('loop', 'coordinator', 2);
     for (let i = 0; i < 2; i += 1) {
@@ -155,5 +155,16 @@ describe('JARVIS agent loop', () => {
       broker.decide(broker.list()[0].id, true);
     }
     expect((await run).result).to.deep.include({ completed: false, stepsUsed: 2 });
+  });
+
+  it('fails loudly when the model repeats the same file read', async () => {
+    const model = scriptedModel(Array(5).fill('{"action":"files.read","path":"."}'));
+    const { authority, broker } = build(model, root);
+    const run = authority.run('loop');
+    await tick(); await tick();
+    broker.decide(broker.list()[0].id, true);
+    const { result } = await run;
+    expect(result.completed).to.equal(false);
+    expect(result.summary).to.contain('same file read');
   });
 });

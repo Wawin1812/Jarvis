@@ -70,9 +70,11 @@ export class JarvisToolGateway {
 
 
 function summarize(input: unknown): string {
+  let text: string;
   try {
-    return JSON.stringify(input) ?? String(input);
+    text = JSON.stringify(input) ?? String(input);
   } catch {
-    return String(input);
+    text = String(input);
   }
+  return text.length > 1_000 ? `${text.slice(0, 1_000)}… (truncated)` : text;
 }

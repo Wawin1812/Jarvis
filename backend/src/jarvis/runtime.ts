@@ -9,6 +9,7 @@ import { OllamaModelClient, type JarvisModelClient } from './model.js';
 import { JarvisTaskManager } from './taskManager.js';
 import { JarvisToolGateway, type JarvisToolHandler } from './toolGateway.js';
 import { createFilesReadHandler } from './tools/filesRead.js';
+import { createFilesWriteHandler } from './tools/filesWrite.js';
 import type { JarvisCapability } from '../services/jarvisPolicy.js';
 
 export interface JarvisRuntime {
@@ -20,6 +21,7 @@ export interface JarvisRuntime {
   approvals: JarvisApprovalBroker;
   agentIds: readonly JarvisAgentId[];
   filesEnabled: boolean;
+  writeEnabled: boolean;
 }
 
 /**
@@ -39,9 +41,10 @@ export function createJarvisRuntime(env: NodeJS.ProcessEnv = process.env): Jarvi
     ? new OllamaModelClient(env.OLLAMA_BASE_URL, env.OLLAMA_MODEL)
     : null;
   const filesEnabled = Boolean(env.JARVIS_FILES_ROOT);
+  const writeEnabled = filesEnabled && env.JARVIS_FILES_WRITE === 'true';
 
   const agents: JarvisAgentDefinition[] = model
-    ? createModelAgents(model, filesEnabled)
+    ? createModelAgents(model, filesEnabled, writeEnabled)
     : [{
       id: 'coordinator',
       description: 'Safe baseline coordinator; chat only until a model adapter is configured.',
@@ -58,12 +61,13 @@ export function createJarvisRuntime(env: NodeJS.ProcessEnv = process.env): Jarvi
     ['chat', async (input: unknown) => `JARVIS baseline received: ${String(input)}`],
   ]);
   if (filesEnabled) handlers.set('files.read', createFilesReadHandler(env.JARVIS_FILES_ROOT as string));
+  if (writeEnabled) handlers.set('files.write', createFilesWriteHandler(env.JARVIS_FILES_ROOT as string));
 
   const approvals = new JarvisApprovalBroker();
   const tools = new JarvisToolGateway(audit, handlers, approvals);
   const authority = new JarvisAuthority(registry, tools, audit);
   return {
-    authority, audit, model, approvals, filesEnabled,
+    authority, audit, model, approvals, filesEnabled, writeEnabled,
     persistentAudit: Boolean(auditKey),
     tasks: new JarvisTaskManager(authority),
     agentIds: model ? ['coordinator', ...SPECIALIST_IDS] : ['coordinator'],
