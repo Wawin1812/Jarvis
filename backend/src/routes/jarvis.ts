@@ -24,6 +24,7 @@ export function createJarvisRouter(runtime: JarvisRuntime, apiToken: string | un
       agents: runtime.agentIds,
       model: runtime.model ? { provider: runtime.model.provider, name: runtime.model.model } : null,
       persistentAudit: runtime.persistentAudit,
+      trusted: runtime.approvals.trustedCapabilities(),
     });
   });
 
@@ -63,11 +64,16 @@ export function createJarvisRouter(runtime: JarvisRuntime, apiToken: string | un
   });
 
   router.post('/approvals/:id', (req: Request, res: Response) => {
-    const approve = (req.body as { approve?: unknown } | undefined)?.approve;
+    const { approve, remember } = (req.body ?? {}) as { approve?: unknown; remember?: unknown };
     if (typeof approve !== 'boolean') return res.status(400).json({ error: 'approve must be true or false.' });
-    return runtime.approvals.decide(String(req.params.id), approve)
+    return runtime.approvals.decide(String(req.params.id), approve, remember === true)
       ? res.json({ ok: true })
       : res.status(404).json({ error: 'Approval request not found or already settled.' });
+  });
+
+  router.delete('/trust', (_req, res) => {
+    runtime.approvals.revokeTrust();
+    res.json({ ok: true });
   });
 
   router.post('/screen', async (req: Request, res: Response) => {

@@ -24,6 +24,7 @@ export class JarvisToolGateway {
     }
 
     let approval = request.approval;
+    if (!approval && this.broker) approval = this.broker.grantIfTrusted(request.capability) ?? undefined;
     if (!approval && this.broker && this.handlers.has(request.capability)) {
       const needsApproval = !decideJarvisPolicy({ capability: request.capability, approved: false }).allowed;
       const approvable = decideJarvisPolicy({ capability: request.capability, approved: true, approvalId: 'preflight', sessionActive: true }).allowed;

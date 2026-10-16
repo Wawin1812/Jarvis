@@ -168,3 +168,25 @@ describe('JARVIS agent loop', () => {
     expect(result.summary).to.contain('same file read');
   });
 });
+
+describe('JARVIS approval trust', () => {
+  it('trusts only one read-only capability at a time and never writes', () => {
+    const broker = new JarvisApprovalBroker();
+    expect(broker.trust('files.write')).to.equal(false);
+    expect(broker.trust('files.read')).to.equal(true);
+    expect(broker.grantIfTrusted('files.read')?.capability).to.equal('files.read');
+    expect(broker.trust('browser.read')).to.equal(true);
+    expect(broker.grantIfTrusted('files.read')).to.equal(null);
+    expect(broker.trustedCapabilities()).to.deep.equal(['browser.read']);
+    broker.revokeTrust();
+    expect(broker.grantIfTrusted('browser.read')).to.equal(null);
+  });
+
+  it('"remember" on approve starts a trust window', async () => {
+    const broker = new JarvisApprovalBroker();
+    const pending = broker.request({ taskId: 't', agentId: 'coordinator', capability: 'files.read', summary: '{}' });
+    broker.decide(broker.list()[0].id, true, true);
+    await pending;
+    expect(broker.trustedCapabilities()).to.deep.equal(['files.read']);
+  });
+});

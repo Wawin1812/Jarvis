@@ -24,7 +24,10 @@ declare global {
 type PendingApproval = { id: string; agentId: string; capability: string; summary: string };
 type BackgroundTask = { id: string; label: string; status: 'running' | 'completed' | 'failed'; summary?: string };
 
-const STOP_PHRASES = /^(stop listening|goodbye|good bye|that'?s all|stop conversation)\.?$/i;
+const SLEEP_PHRASES = /^(goodbye|good bye|that'?s all)\.?$/i;
+const STOP_PHRASES = /^(stop listening|stop conversation)\.?$/i;
+const WAKE_PHRASE = /^(?:(?:hey|hi|okay|ok)[,\s]+)?jarvis\b[,.!?\s]*/i;
+const TRUSTABLE = ['files.read', 'browser.read'];
 
 // "in the background, do X" / "do X in the background" -> background task.
 function splitBackground(text: string): { goal: string; background: boolean } {
@@ -63,6 +66,7 @@ export function JarvisPanel() {
   const conversationRef = useRef(false);
   const busyRef = useRef(false);
   const heardRef = useRef(false);
+  const awakeUntilRef = useRef(0);
   const speakRef = useRef(true);
   const sendRef = useRef<(text?: string) => Promise<void>>(async () => undefined);
 
@@ -134,9 +138,9 @@ export function JarvisPanel() {
     });
   }
 
-  async function decide(id: string, approve: boolean) {
+  async function decide(id: string, approve: boolean, remember = false) {
     setApprovals((current) => current.filter((item) => item.id !== id));
-    await api(`/approvals/${id}`, { method: 'POST', body: JSON.stringify({ approve }) });
+    await api(`/approvals/${id}`, { method: 'POST', body: JSON.stringify({ approve, remember }) });
   }
 
   function withHistory(request: string) {
@@ -178,10 +182,17 @@ export function JarvisPanel() {
       setMessages((current) => [...current, 'JARVIS: enter a command and API token first.']);
       return;
     }
+    if (SLEEP_PHRASES.test(raw)) {
+      awakeUntilRef.current = 0;
+      setMessages((current) => [...current, 'JARVIS: going back to sleep. Say “Hey Jarvis” to wake me.']);
+      speakNow('Goodbye. Say hey Jarvis when you need me.', resumeListening);
+      setGoal('');
+      return;
+    }
     if (STOP_PHRASES.test(raw)) {
       setConversation(false);
       conversationRef.current = false;
-      setMessages((current) => [...current, 'JARVIS: conversation mode off.']);
+      setMessages((current) => [...current, 'JARVIS: hands-free mode off.']);
       speakNow('Okay, I will stop listening.');
       setGoal('');
       return;
@@ -243,6 +254,7 @@ export function JarvisPanel() {
       historyRef.current = [...historyRef.current, { user: request, jarvis: answer }].slice(-3);
       speakNewSentences(answer, true);
       spokeAnswer = true;
+      awakeUntilRef.current = Date.now() + 30_000;
       setGoal('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'request failed';
@@ -259,6 +271,32 @@ export function JarvisPanel() {
   }
   sendRef.current = sendCommand;
 
+  // Hands-free: act on "Hey Jarvis …" or, for 30 s after the last exchange, on any follow-up; otherwise stay asleep.
+  function handleHeard(transcript: string) {
+    if (!conversationRef.current) {
+      setGoal(transcript);
+      void sendRef.current(transcript);
+      return;
+    }
+    const wake = WAKE_PHRASE.exec(transcript);
+    if (wake) {
+      const rest = transcript.slice(wake[0].length).trim();
+      awakeUntilRef.current = Date.now() + 30_000;
+      if (rest) {
+        setGoal(rest);
+        void sendRef.current(rest);
+      } else {
+        setMessages((current) => [...current, 'JARVIS: yes?']);
+        speakNow('Yes?', resumeListening);
+      }
+    } else if (Date.now() < awakeUntilRef.current) {
+      setGoal(transcript);
+      void sendRef.current(transcript);
+    } else {
+      setTimeout(resumeListening, 300);
+    }
+  }
+
   function startListening() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -271,8 +309,7 @@ export function JarvisPanel() {
     recognition.onresult = (event) => {
       const transcript = event.results[0][0].transcript;
       heardRef.current = true;
-      setGoal(transcript);
-      void sendRef.current(transcript);
+      handleHeard(transcript);
     };
     recognition.onend = () => {
       setListening(false);
@@ -413,7 +450,7 @@ export function JarvisPanel() {
           <input type="checkbox" checked={runInBackground} onChange={(event) => setRunInBackground(event.target.checked)} /> Run tasks in the background
         </label>
         <label className="jarvis-note">
-          <input type="checkbox" checked={conversation} onChange={(event) => toggleConversation(event.target.checked)} /> Hands-free conversation (say “goodbye” to stop)
+          <input type="checkbox" checked={conversation} onChange={(event) => toggleConversation(event.target.checked)} /> Hands-free (say “Hey Jarvis” to wake, “goodbye” to sleep)
         </label>
       </div>
 
@@ -432,6 +469,7 @@ export function JarvisPanel() {
           <code className="approval-input">{item.summary}</code>
           <div className="approval-actions">
             <button type="button" onClick={() => void decide(item.id, true)}>Approve once</button>
+            {TRUSTABLE.includes(item.capability) && <button type="button" onClick={() => void decide(item.id, true, true)}>Allow for 30 min</button>}
             <button type="button" className="deny" onClick={() => void decide(item.id, false)}>Deny</button>
           </div>
         </div>

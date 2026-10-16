@@ -105,9 +105,9 @@ export function createWebReadHandler(): JarvisToolHandler {
       const search = new URL('https://html.duckduckgo.com/html/');
       search.searchParams.set('q', query.trim().slice(0, 300));
       const { body } = await fetchBody(search);
-      const results = parseSearchResults(body);
+      const results = parseSearchResults(body, 4);
       if (!results.length) return 'No results found.';
-      return results.map((r, i) => `${i + 1}. ${r.title}\n${r.url}\n${r.snippet}`).join('\n\n');
+      return results.map((r, i) => `${i + 1}. ${r.title}\n${r.snippet.slice(0, 220)}\n(${new URL(r.url).hostname})\n${r.url}`).join('\n\n');
     }
     if (typeof url === 'string' && url.length <= 2_000) {
       const { body, type } = await fetchBody(await assertPublicUrl(url));

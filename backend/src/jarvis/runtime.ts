@@ -71,6 +71,9 @@ export function createJarvisRuntime(env: NodeJS.ProcessEnv = process.env): Jarvi
   if (model) handlers.set('memory.write', createMemoryHandler(memory));
 
   const approvals = new JarvisApprovalBroker();
+  // Optional standing trust for ONE read-only capability, e.g. JARVIS_AUTO_APPROVE=browser.read
+  const auto = (env.JARVIS_AUTO_APPROVE ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+  if (auto[0]) approvals.trust(auto[0] as JarvisCapability, 365 * 24 * 3_600_000);
   const tools = new JarvisToolGateway(audit, handlers, approvals);
   const authority = new JarvisAuthority(registry, tools, audit);
   return {

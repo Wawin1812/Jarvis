@@ -16,15 +16,43 @@ interface Waiter extends JarvisPendingApproval {
   timer: NodeJS.Timeout;
 }
 
+/** Only read-only capabilities can be trusted, and file reads and web reads are never trusted together. */
+const TRUSTABLE: ReadonlySet<JarvisCapability> = new Set(['files.read', 'browser.read']);
+
 /** Only a human decision through `decide` can mint an approval; agents never create their own. */
 export class JarvisApprovalBroker {
   private readonly waiting = new Map<string, Waiter>();
+  private readonly trusted = new Map<JarvisCapability, number>();
 
   constructor(
     private readonly requestTimeoutMs = 120_000,
     private readonly grantTtlMs = 60_000,
     private readonly maxPending = 20,
+    private readonly trustTtlMs = 30 * 60_000,
   ) {}
+
+  /** Skips prompts for `capability` until the trust expires. Returns false if it is not trustable. */
+  trust(capability: JarvisCapability, ms = this.trustTtlMs): boolean {
+    if (!TRUSTABLE.has(capability)) return false;
+    for (const other of TRUSTABLE) if (other !== capability) this.trusted.delete(other);
+    this.trusted.set(capability, Date.now() + ms);
+    return true;
+  }
+
+  revokeTrust(): void {
+    this.trusted.clear();
+  }
+
+  trustedCapabilities(): JarvisCapability[] {
+    const now = Date.now();
+    return [...this.trusted].filter(([, until]) => until > now).map(([capability]) => capability);
+  }
+
+  grantIfTrusted(capability: JarvisCapability): JarvisApproval | null {
+    const until = this.trusted.get(capability);
+    if (!until || until <= Date.now()) return null;
+    return { id: crypto.randomUUID(), capability, expiresAt: new Date(Date.now() + this.grantTtlMs).toISOString() };
+  }
 
   request(info: Pick<JarvisPendingApproval, 'taskId' | 'agentId' | 'capability' | 'summary'>): Promise<JarvisApproval | null> {
     if (this.waiting.size >= this.maxPending) return Promise.resolve(null);
@@ -49,9 +77,10 @@ export class JarvisApprovalBroker {
     return [...this.waiting.values()].map(({ resolve: _resolve, timer: _timer, ...pending }) => pending);
   }
 
-  decide(id: string, approve: boolean): boolean {
+  decide(id: string, approve: boolean, remember = false): boolean {
     const waiter = this.waiting.get(id);
     if (!waiter) return false;
+    if (approve && remember) this.trust(waiter.capability);
     this.settle(id, approve ? {
       id: crypto.randomUUID(),
       capability: waiter.capability,

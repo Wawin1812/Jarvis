@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
     private var history: [(user: String, jarvis: String)] = []
     private var backgroundCheckbox: NSButton!
     private var conversationCheckbox: NSButton!
+    private var awakeUntil = Date.distantPast
     private var pollTick = 0
 
     static func main() {
@@ -101,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
         speakCheckbox = NSButton(checkboxWithTitle: "Speak replies aloud", target: nil, action: nil)
         speakCheckbox.state = .on
         backgroundCheckbox = NSButton(checkboxWithTitle: "Run tasks in the background", target: nil, action: nil)
-        conversationCheckbox = NSButton(checkboxWithTitle: "Hands-free conversation (say “goodbye” to stop)", target: self, action: #selector(conversationToggled))
+        conversationCheckbox = NSButton(checkboxWithTitle: "Hands-free (say “Hey Jarvis” to wake, “goodbye” to sleep)", target: self, action: #selector(conversationToggled))
         let mainStack = verticalStack([title, subtitle, statusLabel, separator(), configStack, separator(), commandStack, speakCheckbox, backgroundCheckbox, conversationCheckbox, scroll], spacing: 10)
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(mainStack)
@@ -178,10 +179,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
             showError("Configure the JARVIS API token first.")
             return
         }
-        if raw.range(of: #"^(stop listening|goodbye|good bye|that'?s all|stop conversation)\.?$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+        if raw.range(of: #"^(goodbye|good bye|that'?s all)\.?$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            awakeUntil = .distantPast
+            commandField.stringValue = ""
+            appendOutput("JARVIS: going back to sleep. Say “Hey Jarvis” to wake me.")
+            speak("Goodbye. Say hey Jarvis when you need me.")
+            return
+        }
+        if raw.range(of: #"^(stop listening|stop conversation)\.?$"#, options: [.regularExpression, .caseInsensitive]) != nil {
             conversationCheckbox.state = .off
             commandField.stringValue = ""
-            appendOutput("JARVIS: conversation mode off.")
+            appendOutput("JARVIS: hands-free mode off.")
             speak("Okay, I will stop listening.")
             return
         }
@@ -323,7 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
         guard watches[id] != nil else { return }
         if !watch.background { speakNewSentences(answer ?? "", id: id, final: true) }
         watches[id] = nil
-        if !watch.background { sendButton.isEnabled = true }
+        if !watch.background { sendButton.isEnabled = true; awakeUntil = Date().addingTimeInterval(30) }
         appendOutput(text)
         if let answer { history = Array((history + [(watch.request, answer)]).suffix(3)) }
         if let spoken { speak(spoken) }
@@ -343,9 +351,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Deny")
         alert.addButton(withTitle: "Approve once")
-        let approve = alert.runModal() == .alertSecondButtonReturn
+        let readOnly = ["files.read", "browser.read"].contains(item["capability"] as? String ?? "")
+        if readOnly { alert.addButton(withTitle: "Approve for 30 min") }
+        let choice = alert.runModal()
+        let approve = choice != .alertFirstButtonReturn
+        let remember = choice == .alertThirdButtonReturn
         promptingApproval = false
-        request(path: "/api/jarvis/approvals/\(id)", method: "POST", body: ["approve": approve]) { [weak self] result in
+        request(path: "/api/jarvis/approvals/\(id)", method: "POST", body: ["approve": approve, "remember": remember]) { [weak self] result in
             if case .failure(let error) = result {
                 DispatchQueue.main.async { self?.appendOutput("Approval error: \(error.localizedDescription)") }
             }
@@ -466,9 +478,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
         do {
             try engine.start()
             micButton.title = "Stop listening"
-            statusLabel.stringValue = "Listening… speak, then pause"
+            statusLabel.stringValue = conversationCheckbox.state == .on && Date() >= awakeUntil ? "Waiting for “Hey Jarvis”…" : "Listening… speak, then pause"
             statusLabel.textColor = .systemOrange
-            appendOutput("Listening… speak a command, then pause.")
+            if conversationCheckbox.state != .on { appendOutput("Listening… speak a command, then pause.") }
             armVoiceTimer(after: 8)
         } catch {
             appendOutput("Could not start microphone: \(error.localizedDescription)")
@@ -518,8 +530,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
         let transcript = voiceTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         voiceTranscript = ""
         if send, !transcript.isEmpty {
+            if conversationCheckbox.state == .on {
+                handleHandsFree(transcript)
+            } else {
+                commandField.stringValue = transcript
+                sendCommand()
+            }
+        }
+    }
+
+    // Hands-free: act on "Hey Jarvis …" or, for 30 s after the last exchange, on any follow-up; otherwise stay asleep.
+    private func handleHandsFree(_ transcript: String) {
+        let wake = #"^(?:(?:hey|hi|okay|ok)[,\s]+)?jarvis\b[,.!?\s]*"#
+        if let range = transcript.range(of: wake, options: [.regularExpression, .caseInsensitive]) {
+            let rest = String(transcript[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            awakeUntil = Date().addingTimeInterval(30)
+            if rest.isEmpty {
+                appendOutput("JARVIS: yes?")
+                speak("Yes?")
+            } else {
+                commandField.stringValue = rest
+                sendCommand()
+            }
+        } else if Date() < awakeUntil {
             commandField.stringValue = transcript
             sendCommand()
+        } else {
+            commandField.stringValue = ""
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.resumeListening() }
         }
     }
 

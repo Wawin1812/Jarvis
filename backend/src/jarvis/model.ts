@@ -39,6 +39,7 @@ export class OllamaModelClient implements JarvisModelClient {
           model: this.model,
           stream: Boolean(request.onToken),
           keep_alive: '30m',
+          options: { num_predict: 600 },
           ...(request.json ? { format: 'json' } : {}),
           messages: [
             { role: 'system', content: request.instruction },
