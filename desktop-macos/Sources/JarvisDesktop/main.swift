@@ -375,7 +375,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if result.isFinal { self.teardownVoice(send: true); return }
                 }
                 if let error {
-                    if self.voiceTranscript.isEmpty { self.appendOutput("Voice error: \(error.localizedDescription)") }
+                    if self.voiceTranscript.isEmpty {
+                        let message = error.localizedDescription
+                        self.appendOutput(message.contains("Dictation") ? "Voice needs macOS Dictation. Turn it on in System Settings → Keyboard → Dictation, then try again." : "Voice error: \(message)")
+                    }
                     self.teardownVoice(send: !self.voiceTranscript.isEmpty)
                 }
             }
