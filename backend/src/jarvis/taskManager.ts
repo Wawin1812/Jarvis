@@ -13,6 +13,8 @@ export interface JarvisManagedTask {
   updatedAt: string;
   task?: JarvisTask;
   result?: JarvisAgentResult;
+  /** Reply text generated so far, while the task is still running. */
+  partial?: string;
   error?: string;
 }
 
@@ -48,7 +50,7 @@ export class JarvisTaskManager {
     record.status = 'running';
     record.updatedAt = new Date().toISOString();
     try {
-      const response = await this.authority.run(record.goal, record.agentId, record.maxSteps);
+      const response = await this.authority.run(record.goal, record.agentId, record.maxSteps, (text) => { record.partial = text; });
       record.status = 'completed';
       record.task = response.task;
       record.result = response.result;

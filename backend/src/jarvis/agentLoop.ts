@@ -41,6 +41,36 @@ function buildInstruction(options: AgentLoopOptions): string {
   ].join('\n');
 }
 
+/** Decodes the part of a still-streaming `"answer"` JSON string that has arrived so far. */
+export function extractAnswerPrefix(buffer: string): string | null {
+  const start = /"answer"\s*:\s*"/.exec(buffer);
+  if (!start) return null;
+  const escapes: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' };
+  let out = '';
+  let i = start.index + start[0].length;
+  while (i < buffer.length) {
+    const char = buffer[i];
+    if (char === '"') break;
+    if (char === '\\') {
+      const next = buffer[i + 1];
+      if (next === undefined) break;
+      if (next === 'u') {
+        const hex = buffer.slice(i + 2, i + 6);
+        if (hex.length < 4) break;
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 6;
+        continue;
+      }
+      out += escapes[next] ?? next;
+      i += 2;
+      continue;
+    }
+    out += char;
+    i += 1;
+  }
+  return out;
+}
+
 function parseAction(raw: string): Action {
   try {
     const value = JSON.parse(raw) as Record<string, unknown>;
@@ -67,7 +97,17 @@ export async function runAgentLoop(context: JarvisAgentContext, options: AgentLo
 
   while (stepsUsed < maxSteps) {
     stepsUsed += 1;
-    const raw = await options.model.complete({ instruction, userInput: transcript, json: true });
+    const raw = await options.model.complete({
+      instruction, userInput: transcript, json: true,
+      ...(context.onPartial ? { onToken: (() => {
+        let buffer = '';
+        return (chunk: string) => {
+          buffer += chunk;
+          const answer = extractAnswerPrefix(buffer);
+          if (answer) context.onPartial?.(answer);
+        };
+      })() } : {}),
+    });
     const action = parseAction(raw);
     if (action.action === 'final') return { summary: action.answer, completed: true, stepsUsed };
 

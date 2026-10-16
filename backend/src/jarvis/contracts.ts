@@ -27,6 +27,8 @@ export interface JarvisApproval {
 export interface JarvisAgentContext {
   task: JarvisTask;
   requestTool: (request: JarvisToolRequest) => Promise<JarvisToolResult>;
+  /** Receives the reply text as it is being generated (top-level agent only). */
+  onPartial?: (text: string) => void;
   /** Present only for the coordinator; the specialist runs with its own capabilities. */
   delegate?: (agentId: JarvisAgentId, goal: string, maxSteps: number) => Promise<JarvisAgentResult>;
 }

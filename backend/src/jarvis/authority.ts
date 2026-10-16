@@ -12,11 +12,11 @@ export class JarvisAuthority {
     private readonly audit: JarvisAuditSink,
   ) {}
 
-  async run(goal: string, agentId: JarvisAgentId = 'coordinator', maxSteps = 10): Promise<{ task: JarvisTask; result: JarvisAgentResult }> {
-    return this.runTask(goal, agentId, maxSteps, 0);
+  async run(goal: string, agentId: JarvisAgentId = 'coordinator', maxSteps = 10, onPartial?: (text: string) => void): Promise<{ task: JarvisTask; result: JarvisAgentResult }> {
+    return this.runTask(goal, agentId, maxSteps, 0, onPartial);
   }
 
-  private async runTask(goal: string, agentId: JarvisAgentId, maxSteps: number, depth: number): Promise<{ task: JarvisTask; result: JarvisAgentResult }> {
+  private async runTask(goal: string, agentId: JarvisAgentId, maxSteps: number, depth: number, onPartial?: (text: string) => void): Promise<{ task: JarvisTask; result: JarvisAgentResult }> {
     if (!goal.trim()) throw new Error('Task goal must not be empty.');
     if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > MAX_STEPS) {
       throw new Error(`maxSteps must be an integer from 1 to ${MAX_STEPS}.`);
@@ -36,6 +36,7 @@ export class JarvisAuthority {
       const result = await agent.run({
         task,
         requestTool: (request) => this.tools.execute(agent, task.id, request),
+        ...(onPartial && depth === 0 ? { onPartial } : {}),
         // Only the top-level coordinator may delegate, and only one level deep.
         ...(agentId === 'coordinator' && depth === 0 ? {
           delegate: async (subAgentId: JarvisAgentId, subGoal: string, subSteps: number) => {

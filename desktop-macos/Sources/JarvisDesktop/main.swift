@@ -26,6 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var promptingApproval = false
     private var speakCheckbox: NSButton!
     private let synthesizer = AVSpeechSynthesizer()
+    private var spokenCount = 0
+    private var pollTick = 0
 
     static func main() {
         let app = NSApplication.shared
@@ -193,7 +195,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func pollTask(_ id: String) {
         pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        spokenCount = 0
+        pollTick = 0
+        synthesizer.stopSpeaking(at: .immediate)
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
             self?.pollOnce(id)
         }
     }
@@ -205,16 +210,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appendOutput(message)
     }
 
-    private func speak(_ text: String) {
-        guard speakCheckbox.state == .on else { return }
-        synthesizer.stopSpeaking(at: .immediate)
-        synthesizer.speak(AVSpeechUtterance(string: String(text.prefix(1_000))))
+    // Speaks each completed sentence once; `final` also speaks the unfinished tail.
+    private func speakNewSentences(_ text: String, final: Bool) {
+        guard speakCheckbox.state == .on, text.count > spokenCount else { return }
+        let pending = String(text.dropFirst(spokenCount))
+        var chunk = pending
+        if !final {
+            let marks = [". ", "! ", "? ", "\n"].compactMap { pending.range(of: $0, options: .backwards)?.upperBound }
+            guard let end = marks.max() else { return }
+            chunk = String(pending[..<end])
+        }
+        spokenCount += chunk.count
+        let spoken = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !spoken.isEmpty { synthesizer.speak(AVSpeechUtterance(string: String(spoken.prefix(1_000)))) }
     }
 
     private func pollOnce(_ id: String) {
-        request(path: "/api/jarvis/approvals", method: "GET", body: nil) { [weak self] result in
-            guard case .success(let data) = result, let list = Self.json(data)?["approvals"] as? [[String: Any]] else { return }
-            DispatchQueue.main.async { self?.promptForApprovals(list) }
+        pollTick += 1
+        if pollTick % 4 == 1 {
+            request(path: "/api/jarvis/approvals", method: "GET", body: nil) { [weak self] result in
+                guard case .success(let data) = result, let list = Self.json(data)?["approvals"] as? [[String: Any]] else { return }
+                DispatchQueue.main.async { self?.promptForApprovals(list) }
+            }
         }
         request(path: "/api/jarvis/tasks/\(id)", method: "GET", body: nil) { [weak self] result in
             DispatchQueue.main.async {
@@ -224,10 +241,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.finishTask("JARVIS error: \(error.localizedDescription)")
                 case .success(let data):
                     guard let task = Self.json(data), let status = task["status"] as? String else { return }
+                    if let partial = task["partial"] as? String { self.speakNewSentences(partial, final: false) }
                     if status == "completed" {
                         let summary = (task["result"] as? [String: Any])?["summary"] as? String ?? data
                         self.finishTask("JARVIS: \(summary)")
-                        self.speak(summary)
+                        self.speakNewSentences(summary, final: true)
                     } else if status == "failed" {
                         self.finishTask("JARVIS error: \(task["error"] as? String ?? "task failed")")
                     }

@@ -38,6 +38,8 @@ export function JarvisPanel() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [speakReplies, setSpeakReplies] = useState(true);
   const [phase, setPhase] = useState('');
+  const [live, setLive] = useState('');
+  const spokenRef = useRef(0);
   const historyRef = useRef<{ user: string; jarvis: string }[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -82,32 +84,45 @@ export function JarvisPanel() {
     }
     setBusy(true);
     setPhase('Thinking…');
+    setLive('');
+    spokenRef.current = 0;
+    window.speechSynthesis?.cancel();
     setMessages((current) => [...current, `You: ${trimmedGoal}`]);
     try {
       const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: withHistory(trimmedGoal), agentId: agent }) });
       let task = await response.json();
       if (!response.ok) throw new Error(task.error || `HTTP ${response.status}`);
+      let tick = 0;
       while (task.status === 'queued' || task.status === 'running') {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        const [taskResponse, approvalResponse] = await Promise.all([api(`/tasks/${task.id}`), api('/approvals')]);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const taskResponse = await api(`/tasks/${task.id}`);
         if (!taskResponse.ok) throw new Error(`HTTP ${taskResponse.status}`);
         task = await taskResponse.json();
-        const pending = approvalResponse.ok ? (await approvalResponse.json()).approvals ?? [] : [];
-        setApprovals(pending);
-        setPhase(pending.length ? 'Waiting for your approval…' : 'Thinking…');
+        if (typeof task.partial === 'string' && task.partial) {
+          setLive(task.partial);
+          setPhase('');
+          speakNewSentences(task.partial, false);
+        }
+        if (tick++ % 4 === 0) {
+          const approvalResponse = await api('/approvals');
+          const pending = approvalResponse.ok ? (await approvalResponse.json()).approvals ?? [] : [];
+          setApprovals(pending);
+          if (pending.length) setPhase('Waiting for your approval…');
+        }
       }
       setApprovals([]);
       if (task.status === 'failed') throw new Error(task.error || 'Task failed.');
       const answer: string = task.result?.summary || JSON.stringify(task);
       setMessages((current) => [...current, `${agent}: ${answer}`]);
       historyRef.current = [...historyRef.current, { user: trimmedGoal, jarvis: answer }].slice(-3);
-      speak(answer);
+      speakNewSentences(answer, true);
       setGoal('');
     } catch (error) {
       setMessages((current) => [...current, `JARVIS error: ${error instanceof Error ? error.message : 'request failed'}`]);
     } finally {
       setBusy(false);
       setPhase('');
+      setLive('');
     }
   }
 
@@ -116,10 +131,15 @@ export function JarvisPanel() {
     return past ? `Earlier in this conversation:\n${past}\n\nNew request: ${request}` : request;
   }
 
-  function speak(text: string) {
+  // Speaks each completed sentence once; `final` also speaks the unfinished tail.
+  function speakNewSentences(text: string, final: boolean) {
     if (!speakReplies || !('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(text.slice(0, 1_000)));
+    const pending = text.slice(spokenRef.current);
+    const ends = ['. ', '! ', '? ', '\\n'].map((mark) => (pending.lastIndexOf(mark) < 0 ? 0 : pending.lastIndexOf(mark) + mark.length));
+    const complete = final ? pending : pending.slice(0, Math.max(...ends));
+    if (!complete.trim()) return;
+    spokenRef.current += complete.length;
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(complete.trim().slice(0, 1_000)));
   }
 
   async function requestMicrophone() {
@@ -259,7 +279,7 @@ export function JarvisPanel() {
           </div>
         </div>
       ))}
-      <pre className="jarvis-output" aria-live="polite">{messages.join('\n\n')}</pre>
+      <pre className="jarvis-output" aria-live="polite">{[...messages, ...(live ? [`${agent}: ${live}…`] : [])].join('\n\n')}</pre>
       <p className="jarvis-note">Screen frames are sent only when you click “Analyze this frame”, and only to the configured backend/model. Microphone audio is not uploaded; browser speech recognition may use the browser’s speech service.</p>
     </section>
   );

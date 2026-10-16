@@ -4,6 +4,8 @@ export interface JarvisModelRequest {
   timeoutMs?: number;
   images?: string[];
   json?: boolean;
+  /** When set, the response is streamed and each text chunk is passed here as it arrives. */
+  onToken?: (chunk: string) => void;
 }
 
 export interface JarvisModelClient {
@@ -35,7 +37,7 @@ export class OllamaModelClient implements JarvisModelClient {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           model: this.model,
-          stream: false,
+          stream: Boolean(request.onToken),
           keep_alive: '30m',
           ...(request.json ? { format: 'json' } : {}),
           messages: [
@@ -45,8 +47,9 @@ export class OllamaModelClient implements JarvisModelClient {
         }),
         signal: controller.signal,
       });
-      const body = await response.text();
       if (!response.ok) throw new Error(`Local model request failed with status ${response.status}.`);
+      if (request.onToken && response.body) return await readStream(response.body, request.onToken);
+      const body = await response.text();
       if (body.length > 1_000_000) throw new Error('Local model response exceeded the size limit.');
       const parsed = JSON.parse(body) as { message?: { content?: unknown } };
       if (typeof parsed.message?.content !== 'string') throw new Error('Local model returned an invalid response.');
@@ -55,4 +58,26 @@ export class OllamaModelClient implements JarvisModelClient {
       clearTimeout(timeout);
     }
   }
+}
+
+async function readStream(stream: ReadableStream<Uint8Array>, onToken: (chunk: string) => void): Promise<string> {
+  const decoder = new TextDecoder();
+  let pending = '';
+  let full = '';
+  const handleLine = (line: string) => {
+    if (!line.trim()) return;
+    const content = (JSON.parse(line) as { message?: { content?: unknown } }).message?.content;
+    if (typeof content !== 'string') return;
+    full += content;
+    if (full.length > 1_000_000) throw new Error('Local model response exceeded the size limit.');
+    if (content) onToken(content);
+  };
+  for await (const chunk of stream) {
+    pending += decoder.decode(chunk, { stream: true });
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    lines.forEach(handleLine);
+  }
+  handleLine(pending);
+  return full;
 }
