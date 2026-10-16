@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDisplayName</key>
 	<string>JARVIS</string>
+	<key>CFBundleExecutable</key>
+	<string>JARVIS</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.jarvis.desktop</string>
 	<key>CFBundleName</key>
@@ -16,13 +18,15 @@
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>JARVIS uses the microphone only after you explicitly enable voice input.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>JARVIS transcribes an explicitly started voice command so it can be sent to your local assistant.</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>JARVIS captures the screen only after you explicitly request screen assistance.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>JARVIS uses the microphone only after you explicitly enable voice input.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>JARVIS captures the screen only after you explicitly request screen assistance.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>JARVIS transcribes an explicitly started voice command so it can be sent to your local assistant.</string>
 </dict>
 </plist>

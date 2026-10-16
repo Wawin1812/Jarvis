@@ -21,6 +21,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var audioEngine: AVAudioEngine?
     private var speechRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var pollTimer: Timer?
+    private var promptedApprovals = Set<String>()
+    private var promptingApproval = false
+    private var speakCheckbox: NSButton!
+    private let synthesizer = AVSpeechSynthesizer()
+
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.run()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -75,7 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             horizontalStack([healthButton, micButton, screenButton, analyzeScreenButton]),
         ], spacing: 8)
         let commandStack = horizontalStack([commandField, sendButton])
-        let mainStack = verticalStack([title, subtitle, statusLabel, separator(), configStack, separator(), commandStack, scroll], spacing: 10)
+        speakCheckbox = NSButton(checkboxWithTitle: "Speak replies aloud", target: nil, action: nil)
+        speakCheckbox.state = .on
+        let mainStack = verticalStack([title, subtitle, statusLabel, separator(), configStack, separator(), commandStack, speakCheckbox, scroll], spacing: 10)
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(mainStack)
 
@@ -154,14 +168,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sendButton.isEnabled = false
         appendOutput("You: \(goal)")
         let body: [String: Any] = ["goal": goal]
-        request(path: "/api/jarvis/tasks", method: "POST", body: body) { [weak self] result in
+        request(path: "/api/jarvis/tasks/async", method: "POST", body: body) { [weak self] result in
             DispatchQueue.main.async {
-                self?.sendButton.isEnabled = true
                 self?.commandField.stringValue = ""
                 switch result {
-                case .success(let data): self?.appendOutput("JARVIS: \(data)")
-                case .failure(let error): self?.appendOutput("JARVIS error: \(error.localizedDescription)")
+                case .success(let data):
+                    guard let id = Self.json(data)?["id"] as? String else {
+                        self?.sendButton.isEnabled = true
+                        self?.appendOutput("JARVIS error: unexpected response \(data)")
+                        return
+                    }
+                    self?.pollTask(id)
+                case .failure(let error):
+                    self?.sendButton.isEnabled = true
+                    self?.appendOutput("JARVIS error: \(error.localizedDescription)")
                 }
+            }
+        }
+    }
+
+    private static func json(_ text: String) -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
+    }
+
+    private func pollTask(_ id: String) {
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.pollOnce(id)
+        }
+    }
+
+    private func finishTask(_ message: String) {
+        pollTimer?.invalidate()
+        pollTimer = nil
+        sendButton.isEnabled = true
+        appendOutput(message)
+    }
+
+    private func speak(_ text: String) {
+        guard speakCheckbox.state == .on else { return }
+        synthesizer.stopSpeaking(at: .immediate)
+        synthesizer.speak(AVSpeechUtterance(string: String(text.prefix(1_000))))
+    }
+
+    private func pollOnce(_ id: String) {
+        request(path: "/api/jarvis/approvals", method: "GET", body: nil) { [weak self] result in
+            guard case .success(let data) = result, let list = Self.json(data)?["approvals"] as? [[String: Any]] else { return }
+            DispatchQueue.main.async { self?.promptForApprovals(list) }
+        }
+        request(path: "/api/jarvis/tasks/\(id)", method: "GET", body: nil) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, self.pollTimer != nil else { return }
+                switch result {
+                case .failure(let error):
+                    self.finishTask("JARVIS error: \(error.localizedDescription)")
+                case .success(let data):
+                    guard let task = Self.json(data), let status = task["status"] as? String else { return }
+                    if status == "completed" {
+                        let summary = (task["result"] as? [String: Any])?["summary"] as? String ?? data
+                        self.finishTask("JARVIS: \(summary)")
+                        self.speak(summary)
+                    } else if status == "failed" {
+                        self.finishTask("JARVIS error: \(task["error"] as? String ?? "task failed")")
+                    }
+                }
+            }
+        }
+    }
+
+    private func promptForApprovals(_ approvals: [[String: Any]]) {
+        guard !promptingApproval else { return }
+        guard let item = approvals.first(where: { !promptedApprovals.contains($0["id"] as? String ?? "") }),
+              let id = item["id"] as? String else { return }
+        promptingApproval = true
+        promptedApprovals.insert(id)
+        let alert = NSAlert()
+        alert.messageText = "Approval required"
+        alert.informativeText = "\(item["agentId"] as? String ?? "agent") wants to use \(item["capability"] as? String ?? "a tool"):\n\(item["summary"] as? String ?? "")"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Deny")
+        alert.addButton(withTitle: "Approve once")
+        let approve = alert.runModal() == .alertSecondButtonReturn
+        promptingApproval = false
+        request(path: "/api/jarvis/approvals/\(id)", method: "POST", body: ["approve": approve]) { [weak self] result in
+            if case .failure(let error) = result {
+                DispatchQueue.main.async { self?.appendOutput("Approval error: \(error.localizedDescription)") }
             }
         }
     }
@@ -325,7 +416,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return button
     }
 
-    private func separator() -> NSBox { NSBox.separator() }
+    private func separator() -> NSBox {
+        let box = NSBox()
+        box.boxType = .separator
+        return box
+    }
 
     private func horizontalStack(_ views: [NSView]) -> NSStackView {
         let stack = NSStackView(views: views)

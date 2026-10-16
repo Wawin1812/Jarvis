@@ -36,6 +36,9 @@ export function JarvisPanel() {
   const [agent, setAgent] = useState('coordinator');
   const [agents, setAgents] = useState<string[]>(['coordinator']);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [speakReplies, setSpeakReplies] = useState(true);
+  const [phase, setPhase] = useState('');
+  const historyRef = useRef<{ user: string; jarvis: string }[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const speechRef = useRef<SpeechRecognitionResult | null>(null);
@@ -71,16 +74,17 @@ export function JarvisPanel() {
     await api(`/approvals/${id}`, { method: 'POST', body: JSON.stringify({ approve }) });
   }
 
-  async function sendCommand() {
-    const trimmedGoal = goal.trim();
+  async function sendCommand(text?: string) {
+    const trimmedGoal = (text ?? goal).trim();
     if (!trimmedGoal || !token.trim()) {
       setMessages((current) => [...current, 'JARVIS: enter a command and API token first.']);
       return;
     }
     setBusy(true);
+    setPhase('Thinking…');
     setMessages((current) => [...current, `You: ${trimmedGoal}`]);
     try {
-      const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: trimmedGoal, agentId: agent }) });
+      const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: withHistory(trimmedGoal), agentId: agent }) });
       let task = await response.json();
       if (!response.ok) throw new Error(task.error || `HTTP ${response.status}`);
       while (task.status === 'queued' || task.status === 'running') {
@@ -88,17 +92,34 @@ export function JarvisPanel() {
         const [taskResponse, approvalResponse] = await Promise.all([api(`/tasks/${task.id}`), api('/approvals')]);
         if (!taskResponse.ok) throw new Error(`HTTP ${taskResponse.status}`);
         task = await taskResponse.json();
-        if (approvalResponse.ok) setApprovals((await approvalResponse.json()).approvals ?? []);
+        const pending = approvalResponse.ok ? (await approvalResponse.json()).approvals ?? [] : [];
+        setApprovals(pending);
+        setPhase(pending.length ? 'Waiting for your approval…' : 'Thinking…');
       }
       setApprovals([]);
       if (task.status === 'failed') throw new Error(task.error || 'Task failed.');
-      setMessages((current) => [...current, `${agent}: ${task.result?.summary || JSON.stringify(task)}`]);
+      const answer: string = task.result?.summary || JSON.stringify(task);
+      setMessages((current) => [...current, `${agent}: ${answer}`]);
+      historyRef.current = [...historyRef.current, { user: trimmedGoal, jarvis: answer }].slice(-3);
+      speak(answer);
       setGoal('');
     } catch (error) {
       setMessages((current) => [...current, `JARVIS error: ${error instanceof Error ? error.message : 'request failed'}`]);
     } finally {
       setBusy(false);
+      setPhase('');
     }
+  }
+
+  function withHistory(request: string) {
+    const past = historyRef.current.map((turn) => `User: ${turn.user}\nJARVIS: ${turn.jarvis}`).join('\n').slice(-2_500);
+    return past ? `Earlier in this conversation:\n${past}\n\nNew request: ${request}` : request;
+  }
+
+  function speak(text: string) {
+    if (!speakReplies || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(text.slice(0, 1_000)));
   }
 
   async function requestMicrophone() {
@@ -178,7 +199,11 @@ export function JarvisPanel() {
       return;
     }
     const recognition = new SpeechRecognition();
-    recognition.onresult = (event) => setGoal(event.results[0][0].transcript);
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setGoal(transcript);
+      void sendCommand(transcript);
+    };
     recognition.onend = () => { setListening(false); speechRef.current = null; };
     recognition.onerror = () => { setListening(false); speechRef.current = null; };
     speechRef.current = recognition;
@@ -210,6 +235,10 @@ export function JarvisPanel() {
         <button type="button" onClick={toggleSpeech} className={listening ? 'permission-btn active' : 'permission-btn'}>{listening ? 'Stop voice' : 'Voice'}</button>
         <button type="button" onClick={() => void sendCommand()} disabled={busy}>{busy ? 'Working…' : 'Send'}</button>
       </div>
+      {phase && <p className="jarvis-note" role="status">{phase}</p>}
+      <label className="jarvis-note">
+        <input type="checkbox" checked={speakReplies} onChange={(event) => { setSpeakReplies(event.target.checked); if (!event.target.checked) window.speechSynthesis?.cancel(); }} /> Speak replies aloud
+      </label>
 
       <div className="jarvis-permissions">
         <button type="button" onClick={() => void requestMicrophone()}>Enable microphone</button>
