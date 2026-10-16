@@ -12,6 +12,14 @@ export interface AgentLoopOptions {
   /** Returns notes the user previously asked JARVIS to remember; enables the remember/forget actions. */
   memory?: () => string[];
   delegateTo?: readonly JarvisAgentId[];
+  /** Lets this agent start other agents in the background and keep talking. */
+  canDispatch?: boolean;
+  /** One line per background agent job (running or finished), shown to the model. */
+  agentStatus?: () => string[];
+  /** Answer plain conversation directly (no JSON, no tool prompt) for a much faster first word. */
+  fastChat?: boolean;
+  /** Optional smaller model used for the fast path. */
+  fastModel?: string;
 }
 
 type Action =
@@ -22,7 +30,10 @@ type Action =
   | { action: 'web.fetch'; url: string }
   | { action: 'remember'; note: string }
   | { action: 'forget'; note: string }
-  | { action: 'delegate'; agent: string; goal: string };
+  | { action: 'delegate'; agent: string; goal: string }
+  | { action: 'dispatch'; agent: string; goal: string };
+
+const MAX_DISPATCHES_PER_TASK = 4;
 
 function buildInstruction(options: AgentLoopOptions): string {
   const actions = ['{"action":"final","answer":"<your reply to the user>"}'];
@@ -40,12 +51,13 @@ function buildInstruction(options: AgentLoopOptions): string {
   }
   if (options.delegateTo?.length) {
     actions.push(`{"action":"delegate","agent":"<one of: ${options.delegateTo.join(', ')}>","goal":"<self-contained subtask>"}`);
+    if (options.canDispatch) {
+      actions.push(`{"action":"dispatch","agent":"<one of: ${options.delegateTo.join(', ')}>","goal":"<self-contained job>"}`);
+    }
   }
   return [
     `You are ${options.role}`,
-    `Current date and time: ${new Date().toLocaleString('en-AU', { dateStyle: 'full', timeStyle: 'short' })}.`,
     'Your replies are spoken aloud: answer in short, natural sentences, without markdown, lists, code fences or raw URLs.',
-    ...(options.memory ? [`What you know about the user (their own notes):${options.memory().map((note) => `\n- ${note}`).join('') || ' nothing yet.'}`, 'Use "remember" only when the user asks you to remember something.'] : []),
     'Reply with exactly one JSON object per turn, using one of these actions:',
     ...actions,
     'Rules:',
@@ -54,7 +66,56 @@ function buildInstruction(options: AgentLoopOptions): string {
     '- A human must approve every file read; if a read is refused, say so instead of guessing the contents.',
     `- Only claim what the observations actually show. You cannot run commands${options.writeEnabled ? '' : ' or modify files'}${options.webEnabled ? '' : ' or browse the web'}; use only the actions listed above. For current events or facts you are unsure of, ${options.webEnabled ? 'use web.search and answer from the result summaries; call web.fetch only if they do not contain the answer' : 'say you cannot look them up'}.`,
     '- Use "final" as soon as you can answer.',
+    ...(options.memory ? ['- Use "remember" only when the user asks you to remember something.'] : []),
+    ...(options.canDispatch ? [
+      '- You are the control unit for a team of agents. Use "dispatch" ONLY when the user explicitly asks you to assign work to an agent, run something in the background, or work on several things at once; it starts that agent in the background and returns at once so the user can keep talking to you. Otherwise answer yourself or use your own tools. After dispatching, tell the user briefly who you assigned to what. Never dispatch the same job twice. Use "delegate" only when you need a specialist\'s answer before you can reply.',
+      '- When the user asks what the agents are doing or found, answer from "Your background agents right now" in the task context; do not dispatch again.',
+    ] : []),
   ].join('\n');
+}
+
+// Volatile facts live in the user message so the long system prompt stays identical and cacheable.
+function buildContext(options: AgentLoopOptions): string {
+  return [
+    `Current date and time: ${new Date().toLocaleString('en-AU', { dateStyle: 'full', timeStyle: 'short' })}.`,
+    ...(options.memory ? [`What you know about the user (their own notes):${options.memory().map((note) => `\n- ${note}`).join('') || ' nothing yet.'}`] : []),
+    ...(options.agentStatus ? [`Your background agents right now:${options.agentStatus().map((line) => `\n- ${line}`).join('') || ' none.'}`] : []),
+  ].join('\n');
+}
+
+const FAST_INSTRUCTION = [
+  'You are JARVIS, a warm, quick personal assistant talking with the user by voice.',
+  'Answer in one to three short, natural spoken sentences. No markdown, lists or URLs. Use the facts in the context.',
+  'If the question needs a file, the web, current events, or anything you cannot answer confidently from what you know, reply with exactly: NEEDS_TOOLS',
+].join('\n');
+
+const TOOL_WORDS = /\b(file|files|folder|directory|workspace|read|open|write|save|create|search|look ?up|google|web|website|internet|online|news|latest|current|currently|weather|forecast|price|score|stock|remember|forget|background|assign|dispatch|agent|agents|reviewer|engineer|researcher|review|audit|code|summari[sz]e|fetch|download)\b|\.(txt|md|json|ts|js|swift)\b/i;
+
+function requestText(goal: string): string {
+  const marker = 'New request: ';
+  const index = goal.lastIndexOf(marker);
+  return index >= 0 ? goal.slice(index + marker.length) : goal;
+}
+
+/** Streams a plain-text reply; returns null when the model asks for tools so the full agent loop can take over. */
+async function tryFastReply(context: JarvisAgentContext, options: AgentLoopOptions, contextBlock: string): Promise<JarvisAgentResult | null> {
+  let buffer = '';
+  let decided = false;
+  const raw = await options.model.complete({
+    instruction: FAST_INSTRUCTION,
+    userInput: `${contextBlock}\n\n${context.task.goal}`,
+    maxTokens: 160,
+    priority: context.task.background ? 'background' : 'foreground',
+    ...(options.fastModel ? { model: options.fastModel } : {}),
+    onToken: (chunk) => {
+      buffer += chunk;
+      if (!decided && buffer.length >= 11) decided = !buffer.startsWith('NEEDS_TOOLS');
+      if (decided) context.onPartial?.(buffer.trim());
+    },
+  });
+  const text = raw.trim();
+  if (!text || text.startsWith('NEEDS_TOOLS')) return null;
+  return { summary: text, completed: true, stepsUsed: 1 };
 }
 
 /** Decodes the part of a still-streaming `"answer"` JSON string that has arrived so far. */
@@ -102,23 +163,36 @@ function parseAction(raw: string): Action {
     if (value.action === 'delegate' && typeof value.agent === 'string' && typeof value.goal === 'string') {
       return { action: 'delegate', agent: value.agent, goal: value.goal };
     }
+    if (value.action === 'dispatch' && typeof value.agent === 'string' && typeof value.goal === 'string') {
+      return { action: 'dispatch', agent: value.agent, goal: value.goal };
+    }
   } catch {
     // Fall through: plain text is treated as the final answer.
   }
+  // Malformed JSON that still carries an answer: speak just the answer, never the JSON.
+  const salvaged = extractAnswerPrefix(raw);
+  if (salvaged) return { action: 'final', answer: salvaged };
   return { action: 'final', answer: raw.trim() || 'No response.' };
 }
 
 export async function runAgentLoop(context: JarvisAgentContext, options: AgentLoopOptions): Promise<JarvisAgentResult> {
   const instruction = buildInstruction(options);
+  const contextBlock = buildContext(options);
   const maxSteps = context.task.maxSteps;
-  let transcript = `Task: ${context.task.goal}`;
+  if (options.fastChat && !TOOL_WORDS.test(requestText(context.task.goal))) {
+    const quick = await tryFastReply(context, options, contextBlock);
+    if (quick) return quick;
+  }
+  let transcript = `${contextBlock}\n\nTask: ${context.task.goal}`;
   let stepsUsed = 0;
   const readPaths = new Set<string>();
+  const dispatched = new Set<string>();
 
   while (stepsUsed < maxSteps) {
     stepsUsed += 1;
     const raw = await options.model.complete({
       instruction, userInput: transcript, json: true,
+      priority: context.task.background ? 'background' : 'foreground',
       ...(context.onPartial ? { onToken: (() => {
         let buffer = '';
         return (chunk: string) => {
@@ -161,6 +235,23 @@ export async function runAgentLoop(context: JarvisAgentContext, options: AgentLo
         ? await context.requestTool({ capability: 'memory.write', input: action.action === 'remember' ? { remember: action.note } : { forget: action.note } })
         : { ok: false, error: 'Memory is not enabled.' };
       observation = result.ok ? String(result.output) : `Error: ${result.error}`;
+    } else if (action.action === 'dispatch') {
+      const key = `${action.agent}:${action.goal}`;
+      if (!context.dispatch || !options.canDispatch || !options.delegateTo?.includes(action.agent as JarvisAgentId)) {
+        observation = 'Error: unknown or unavailable agent.';
+      } else if (dispatched.has(key)) {
+        observation = 'Error: that job was already dispatched. Reply to the user now.';
+      } else if (dispatched.size >= MAX_DISPATCHES_PER_TASK) {
+        observation = 'Error: dispatch limit reached for this request. Reply to the user now.';
+      } else {
+        try {
+          const id = context.dispatch(action.agent as JarvisAgentId, action.goal);
+          dispatched.add(key);
+          observation = `Started ${action.agent} in the background (job ${id.slice(0, 8)}). Its result will be announced to the user when ready. Dispatch other agents if needed, otherwise reply to the user now.`;
+        } catch (error) {
+          observation = `Error: ${error instanceof Error ? error.message : 'dispatch failed.'}`;
+        }
+      }
     } else if (context.delegate && options.delegateTo?.includes(action.agent as JarvisAgentId)) {
       const remaining = maxSteps - stepsUsed;
       if (remaining < 1) {

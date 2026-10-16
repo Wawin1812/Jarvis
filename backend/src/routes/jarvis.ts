@@ -56,7 +56,7 @@ export function createJarvisRouter(runtime: JarvisRuntime, apiToken: string | un
   router.post('/tasks/async', (req: Request, res: Response) => {
     const parsed = parseTask(req.body);
     if ('error' in parsed) return res.status(400).json({ error: parsed.error });
-    return res.status(202).json(runtime.tasks.submit(parsed.goal, parsed.agentId, parsed.maxSteps));
+    return res.status(202).json(runtime.tasks.submit(parsed.goal, parsed.agentId, parsed.maxSteps, undefined, (req.body as { background?: unknown } | undefined)?.background === true));
   });
 
   router.get('/approvals', (_req, res) => {

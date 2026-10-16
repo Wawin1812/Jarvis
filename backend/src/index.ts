@@ -31,7 +31,7 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', modelConfigured: Boolean(runtime.model), persistentAudit: runtime.persistentAudit });
 });
 
-app.use('/api/jarvis', rateLimit({ windowMs: 60_000, limit: 300, standardHeaders: true, legacyHeaders: false }), createJarvisRouter(runtime, process.env.JARVIS_API_TOKEN));
+app.use('/api/jarvis', rateLimit({ windowMs: 60_000, limit: 1_500, standardHeaders: true, legacyHeaders: false }), createJarvisRouter(runtime, process.env.JARVIS_API_TOKEN));
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 

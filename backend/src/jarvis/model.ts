@@ -4,6 +4,13 @@ export interface JarvisModelRequest {
   timeoutMs?: number;
   images?: string[];
   json?: boolean;
+  /** Overrides the client's default model for this call (e.g. a smaller, faster one). */
+  model?: string;
+  /** Upper bound on generated tokens. */
+  maxTokens?: number;
+  priority?: 'foreground' | 'background';
+  /** Aborts the call (used to pre-empt background work for a waiting user). */
+  signal?: AbortSignal;
   /** When set, the response is streamed and each text chunk is passed here as it arrives. */
   onToken?: (chunk: string) => void;
 }
@@ -31,15 +38,16 @@ export class OllamaModelClient implements JarvisModelClient {
   async complete(request: JarvisModelRequest): Promise<string> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), request.timeoutMs ?? this.defaultTimeoutMs);
+    request.signal?.addEventListener('abort', () => controller.abort(), { once: true });
     try {
       const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}/api/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          model: this.model,
+          model: request.model ?? this.model,
           stream: Boolean(request.onToken),
           keep_alive: '30m',
-          options: { num_predict: 600 },
+          options: { num_predict: request.maxTokens ?? 600 },
           ...(request.json ? { format: 'json' } : {}),
           messages: [
             { role: 'system', content: request.instruction },
@@ -81,4 +89,59 @@ async function readStream(stream: ReadableStream<Uint8Array>, onToken: (chunk: s
   }
   handleLine(pending);
   return full;
+}
+
+/**
+ * Runs one model call at a time. Waiting foreground calls go first, and a foreground call
+ * pre-empts a running background one (which is retried afterwards) so the user never waits on background work.
+ */
+export class PrioritizedModelClient implements JarvisModelClient {
+  readonly provider: 'ollama';
+  readonly model: string;
+  private active = 0;
+  private sequence = 0;
+  private readonly queue: Array<{ rank: number; order: number; start: () => void }> = [];
+  private readonly runningBackground = new Set<AbortController>();
+
+  constructor(private readonly inner: JarvisModelClient, private readonly concurrency = 1) {
+    this.provider = inner.provider;
+    this.model = inner.model;
+  }
+
+  complete(request: JarvisModelRequest): Promise<string> {
+    const background = request.priority === 'background';
+    return new Promise((resolve, reject) => {
+      const order = this.sequence++;
+      const enqueue = () => {
+        this.queue.push({ rank: background ? 1 : 0, order, start: run });
+        this.queue.sort((a, b) => a.rank - b.rank || a.order - b.order);
+        this.next();
+      };
+      const run = () => {
+        const controller = new AbortController();
+        // Background partial text is unused, and a retried call must not replay tokens.
+        const call = background ? { ...request, onToken: undefined, signal: controller.signal } : request;
+        if (background) this.runningBackground.add(controller);
+        this.inner.complete(call).then(resolve, (error) => {
+          if (controller.signal.aborted && background) enqueue();
+          else reject(error);
+        }).finally(() => {
+          this.runningBackground.delete(controller);
+          this.active -= 1;
+          this.next();
+        });
+      };
+      enqueue();
+      if (!background && this.active >= this.concurrency && this.runningBackground.size) {
+        (this.runningBackground.values().next().value as AbortController).abort();
+      }
+    });
+  }
+
+  private next(): void {
+    while (this.active < this.concurrency && this.queue.length) {
+      this.active += 1;
+      (this.queue.shift() as { start: () => void }).start();
+    }
+  }
 }

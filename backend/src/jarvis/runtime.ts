@@ -1,11 +1,11 @@
 import { JarvisAgentRegistry } from './agentRegistry.js';
-import { createModelAgents, SPECIALIST_IDS } from './agents.js';
+import { createModelAgents } from './agents.js';
 import { JarvisApprovalBroker } from './approvalBroker.js';
 import { InMemoryJarvisAuditLog, type JarvisAuditSink } from './auditLog.js';
 import { JarvisAuthority } from './authority.js';
 import type { JarvisAgentDefinition, JarvisAgentId } from './contracts.js';
 import { EncryptedJarvisAuditLog, parseAuditKey } from './encryptedAuditLog.js';
-import { OllamaModelClient, type JarvisModelClient } from './model.js';
+import { OllamaModelClient, PrioritizedModelClient, type JarvisModelClient } from './model.js';
 import { JarvisTaskManager } from './taskManager.js';
 import { JarvisToolGateway, type JarvisToolHandler } from './toolGateway.js';
 import { createFilesReadHandler } from './tools/filesRead.js';
@@ -41,15 +41,16 @@ export function createJarvisRuntime(env: NodeJS.ProcessEnv = process.env): Jarvi
     ? new EncryptedJarvisAuditLog(`${env.JARVIS_DATA_DIR || './data/jarvis'}/audit.log`, auditKey)
     : new InMemoryJarvisAuditLog();
   const model = env.OLLAMA_BASE_URL && env.OLLAMA_MODEL
-    ? new OllamaModelClient(env.OLLAMA_BASE_URL, env.OLLAMA_MODEL)
+    ? new PrioritizedModelClient(new OllamaModelClient(env.OLLAMA_BASE_URL, env.OLLAMA_MODEL))
     : null;
   const filesEnabled = Boolean(env.JARVIS_FILES_ROOT);
   const writeEnabled = filesEnabled && env.JARVIS_FILES_WRITE === 'true';
   const webEnabled = env.JARVIS_WEB === 'true';
   const memory = new JarvisMemory(`${env.JARVIS_DATA_DIR || './data/jarvis'}/memory.json`);
+  let taskManager: JarvisTaskManager | undefined;
 
   const agents: JarvisAgentDefinition[] = model
-    ? createModelAgents(model, filesEnabled, writeEnabled, webEnabled, () => memory.list())
+    ? createModelAgents(model, filesEnabled, writeEnabled, webEnabled, () => memory.list(), () => taskManager?.statusLines() ?? [], env.OLLAMA_FAST_MODEL || undefined, true)
     : [{
       id: 'coordinator',
       description: 'Safe baseline coordinator; chat only until a model adapter is configured.',
@@ -76,10 +77,13 @@ export function createJarvisRuntime(env: NodeJS.ProcessEnv = process.env): Jarvi
   if (auto[0]) approvals.trust(auto[0] as JarvisCapability, 365 * 24 * 3_600_000);
   const tools = new JarvisToolGateway(audit, handlers, approvals);
   const authority = new JarvisAuthority(registry, tools, audit);
+  const tasks = new JarvisTaskManager(authority);
+  taskManager = tasks;
+  authority.setDispatcher((agentId, goal, parentId) => tasks.submit(goal, agentId, 8, parentId).id);
   return {
     authority, audit, model, approvals, filesEnabled, writeEnabled, webEnabled,
     persistentAudit: Boolean(auditKey),
-    tasks: new JarvisTaskManager(authority),
-    agentIds: model ? ['coordinator', ...SPECIALIST_IDS] : ['coordinator'],
+    tasks,
+    agentIds: agents.map((agent) => agent.id),
   };
 }

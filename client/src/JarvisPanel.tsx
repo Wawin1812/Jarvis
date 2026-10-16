@@ -22,7 +22,7 @@ declare global {
 }
 
 type PendingApproval = { id: string; agentId: string; capability: string; summary: string };
-type BackgroundTask = { id: string; label: string; status: 'running' | 'completed' | 'failed'; summary?: string };
+type AgentJob = { id: string; agentId: string; label: string; status: 'queued' | 'running' | 'completed' | 'failed'; parentId?: string; summary?: string };
 
 const SLEEP_PHRASES = /^(goodbye|good bye|that'?s all)\.?$/i;
 const STOP_PHRASES = /^(stop listening|stop conversation)\.?$/i;
@@ -57,7 +57,7 @@ export function JarvisPanel() {
   const [conversation, setConversation] = useState(false);
   const [phase, setPhase] = useState('');
   const [live, setLive] = useState('');
-  const [bgTasks, setBgTasks] = useState<BackgroundTask[]>([]);
+  const [jobs, setJobs] = useState<AgentJob[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const speechRef = useRef<SpeechRecognitionResult | null>(null);
@@ -66,6 +66,10 @@ export function JarvisPanel() {
   const conversationRef = useRef(false);
   const busyRef = useRef(false);
   const heardRef = useRef(false);
+  const announcedRef = useRef(new Set<string>());
+  const foregroundIdsRef = useRef(new Set<string>());
+  const ownedIdsRef = useRef(new Set<string>());
+  const seededRef = useRef(false);
   const awakeUntilRef = useRef(0);
   const speakRef = useRef(true);
   const sendRef = useRef<(text?: string) => Promise<void>>(async () => undefined);
@@ -75,42 +79,38 @@ export function JarvisPanel() {
 
   useEffect(() => () => stopScreenCapture(), []);
 
-  // Poll background tasks (and any approval they need) while some are still running.
-  const hasRunning = bgTasks.some((task) => task.status === 'running');
+  // Watch every agent job on the backend (including ones the coordinator starts) and announce finished ones.
   useEffect(() => {
-    if (!hasRunning || !token.trim()) return undefined;
+    if (!token.trim()) return undefined;
     const timer = setInterval(async () => {
       try {
-        const running = bgTasks.filter((task) => task.status === 'running');
-        const updates = await Promise.all(running.map(async (task) => {
-          const response = await api(`/tasks/${task.id}`);
-          return response.ok ? { id: task.id, data: await response.json() } : null;
+        const response = await api('/tasks');
+        if (!response.ok) return;
+        const list: Array<{ id: string; agentId: string; label?: string; goal: string; status: AgentJob['status']; parentId?: string; result?: { summary: string }; error?: string }> = (await response.json()).tasks ?? [];
+        const next: AgentJob[] = list.map((task) => ({
+          id: task.id, agentId: task.agentId, label: task.label ?? task.goal.slice(0, 60), status: task.status, parentId: task.parentId,
+          summary: task.status === 'completed' ? task.result?.summary : task.status === 'failed' ? task.error ?? task.result?.summary : undefined,
         }));
-        const finished: BackgroundTask[] = [];
-        for (const entry of updates) {
-          if (!entry || (entry.data.status !== 'completed' && entry.data.status !== 'failed')) continue;
-          const task = running.find((item) => item.id === entry.id) as BackgroundTask;
-          finished.push({
-            ...task,
-            status: entry.data.status,
-            summary: entry.data.status === 'completed' ? entry.data.result?.summary ?? 'Done.' : entry.data.error ?? 'Task failed.',
-          });
+        const firstPoll = !seededRef.current;
+        seededRef.current = true;
+        for (const job of next) {
+          if ((job.status !== 'completed' && job.status !== 'failed') || announcedRef.current.has(job.id)) continue;
+          announcedRef.current.add(job.id);
+          if (firstPoll || foregroundIdsRef.current.has(job.id) || !isOwned(job)) continue;
+          const who = job.parentId ? job.agentId.replace(/-/g, ' ') : 'Your background task';
+          const verb = job.status === 'completed' ? 'finished' : 'failed';
+          setMessages((current) => [...current, `${job.parentId ? job.agentId : 'Background task'} ${verb} (${job.label}): ${job.summary ?? ''}`]);
+          speakNow(`${who} ${verb}. ${job.summary ?? ''}`);
         }
-        if (finished.length) {
-          setBgTasks((current) => current.map((task) => finished.find((done) => done.id === task.id) ?? task));
-          finished.forEach((task) => {
-            setMessages((current) => [...current, `Background task ${task.status === 'completed' ? 'finished' : 'failed'} (${task.label}): ${task.summary}`]);
-            speakNow(task.status === 'completed' ? `Your background task is done. ${task.summary}` : `A background task failed. ${task.summary}`);
-          });
-        }
-        if (!busyRef.current) {
-          const response = await api('/approvals');
-          if (response.ok) setApprovals((await response.json()).approvals ?? []);
+        setJobs(next.filter((job) => !foregroundIdsRef.current.has(job.id) && isOwned(job)).slice(-8).reverse());
+        if (!busyRef.current && next.some((job) => job.status === 'running')) {
+          const approvalResponse = await api('/approvals');
+          if (approvalResponse.ok) setApprovals((await approvalResponse.json()).approvals ?? []);
         }
       } catch {
         // Transient polling errors are retried on the next tick.
       }
-    }, 1000);
+    }, 1500);
     return () => clearInterval(timer);
   });
 
@@ -129,6 +129,11 @@ export function JarvisPanel() {
       setStatus(`Unavailable · ${error instanceof Error ? error.message : 'connection failed'}`);
       setStatusTone('bad');
     }
+  }
+
+  // Another client (or script) may share this backend; only jobs started from here, or spawned by them, are announced.
+  function isOwned(job: { id: string; parentId?: string }) {
+    return ownedIdsRef.current.has(job.id) || Boolean(job.parentId && ownedIdsRef.current.has(job.parentId));
   }
 
   function api(path: string, init: RequestInit = {}) {
@@ -155,10 +160,10 @@ export function JarvisPanel() {
       return;
     }
     const utterance = new SpeechSynthesisUtterance(text.trim().slice(0, 1_000));
-    if (onDone) {
-      utterance.onend = onDone;
-      utterance.onerror = onDone;
-    }
+    // Never listen while speaking: the mic would pick up JARVIS's own voice.
+    speechRef.current?.stop();
+    utterance.onend = () => { onDone?.(); if (onDone !== resumeListening) setTimeout(resumeListening, 600); };
+    utterance.onerror = utterance.onend;
     window.speechSynthesis.speak(utterance);
   }
 
@@ -166,14 +171,20 @@ export function JarvisPanel() {
   function speakNewSentences(text: string, final: boolean) {
     const pending = text.slice(spokenRef.current);
     const ends = ['. ', '! ', '? ', '\n'].map((mark) => (pending.lastIndexOf(mark) < 0 ? 0 : pending.lastIndexOf(mark) + mark.length));
-    const complete = final ? pending : pending.slice(0, Math.max(...ends));
+    let end = Math.max(...ends);
+    // Start talking after the first clause instead of waiting for a full sentence.
+    if (end === 0 && spokenRef.current === 0) {
+      const comma = Math.max(pending.lastIndexOf(', '), pending.lastIndexOf('; '));
+      if (comma >= 24) end = comma + 2;
+    }
+    const complete = final ? pending : pending.slice(0, end);
     spokenRef.current += complete.length;
     if (final) speakNow(complete, resumeListening);
     else speakNow(complete);
   }
 
   function resumeListening() {
-    if (conversationRef.current && !busyRef.current && !speechRef.current) startListening();
+    if (conversationRef.current && !busyRef.current && !speechRef.current && !window.speechSynthesis?.speaking) startListening();
   }
 
   async function sendCommand(text?: string) {
@@ -205,10 +216,10 @@ export function JarvisPanel() {
 
     if (background) {
       try {
-        const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: withHistory(request), agentId: agent }) });
+        const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: withHistory(request), agentId: agent, background: true }) });
         const task = await response.json();
         if (!response.ok) throw new Error(task.error || `HTTP ${response.status}`);
-        setBgTasks((current) => [{ id: task.id, label: request.slice(0, 60), status: 'running' as const }, ...current].slice(0, 10));
+        ownedIdsRef.current.add(task.id);
         setMessages((current) => [...current, 'JARVIS: on it, working in the background.']);
         setGoal('');
         speakNow('On it. I will tell you when it is done.', resumeListening);
@@ -229,9 +240,11 @@ export function JarvisPanel() {
       const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: withHistory(request), agentId: agent }) });
       let task = await response.json();
       if (!response.ok) throw new Error(task.error || `HTTP ${response.status}`);
+      foregroundIdsRef.current.add(task.id);
+      ownedIdsRef.current.add(task.id);
       let tick = 0;
       while (task.status === 'queued' || task.status === 'running') {
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, 150));
         const taskResponse = await api(`/tasks/${task.id}`);
         if (!taskResponse.ok) throw new Error(`HTTP ${taskResponse.status}`);
         task = await taskResponse.json();
@@ -240,7 +253,7 @@ export function JarvisPanel() {
           setPhase('');
           speakNewSentences(task.partial, false);
         }
-        if (tick++ % 4 === 0) {
+        if (tick++ % 6 === 0) {
           const approvalResponse = await api('/approvals');
           const pending = approvalResponse.ok ? (await approvalResponse.json()).approvals ?? [] : [];
           setApprovals(pending);
@@ -289,7 +302,7 @@ export function JarvisPanel() {
         setMessages((current) => [...current, 'JARVIS: yes?']);
         speakNow('Yes?', resumeListening);
       }
-    } else if (Date.now() < awakeUntilRef.current) {
+    } else if (Date.now() < awakeUntilRef.current && transcript.trim().split(/\s+/).length >= 2) {
       setGoal(transcript);
       void sendRef.current(transcript);
     } else {
@@ -474,10 +487,12 @@ export function JarvisPanel() {
           </div>
         </div>
       ))}
-      {bgTasks.length > 0 && (
-        <ul className="jarvis-tasks" aria-label="Background tasks">
-          {bgTasks.map((task) => (
-            <li key={task.id}><strong>{task.status === 'running' ? 'Running' : task.status === 'completed' ? 'Done' : 'Failed'}</strong> · {task.label}{task.summary ? ` — ${task.summary.slice(0, 120)}` : ''}</li>
+      {jobs.length > 0 && (
+        <ul className="jarvis-tasks" aria-label="Agent jobs">
+          {jobs.map((job) => (
+            <li key={job.id}>
+              <strong>{job.status === 'queued' ? 'Queued' : job.status === 'running' ? 'Working' : job.status === 'completed' ? 'Done' : 'Failed'}</strong> · {job.parentId ? job.agentId : 'background'} · {job.label}{job.summary ? ` — ${job.summary.slice(0, 120)}` : ''}
+            </li>
           ))}
         </ul>
       )}
