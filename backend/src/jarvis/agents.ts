@@ -1,6 +1,7 @@
 import { runAgentLoop } from './agentLoop.js';
 import type { JarvisAgentDefinition, JarvisAgentId } from './contracts.js';
 import type { JarvisModelClient } from './model.js';
+import type { JarvisCapability } from '../services/jarvisPolicy.js';
 
 export const SPECIALIST_IDS = ['frontend-engineer', 'backend-engineer', 'security-reviewer'] as const satisfies readonly JarvisAgentId[];
 
@@ -19,10 +20,11 @@ const SPECIALISTS: Record<(typeof SPECIALIST_IDS)[number], { description: string
   },
 };
 
-export function createModelAgents(model: JarvisModelClient, filesEnabled: boolean, writeEnabled = false): JarvisAgentDefinition[] {
-  const capabilities = new Set<'chat' | 'files.read' | 'files.write'>(filesEnabled ? ['chat', 'files.read'] : ['chat']);
-  const coordinatorCapabilities = new Set(capabilities);
+export function createModelAgents(model: JarvisModelClient, filesEnabled: boolean, writeEnabled = false, webEnabled = false): JarvisAgentDefinition[] {
+  const capabilities = new Set<JarvisCapability>(filesEnabled ? ['chat', 'files.read'] : ['chat']);
+  const coordinatorCapabilities = new Set<JarvisCapability>(capabilities);
   if (writeEnabled) coordinatorCapabilities.add('files.write');
+  if (webEnabled) coordinatorCapabilities.add('browser.read');
 
   const specialists = SPECIALIST_IDS.map((id): JarvisAgentDefinition => ({
     id,
@@ -39,6 +41,7 @@ export function createModelAgents(model: JarvisModelClient, filesEnabled: boolea
       model,
       filesEnabled,
       writeEnabled,
+      webEnabled,
       delegateTo: SPECIALIST_IDS,
       role: 'JARVIS, a local personal assistant. Answer directly when you can; delegate to a specialist for code review or security review.',
     }),
