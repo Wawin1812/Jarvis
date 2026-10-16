@@ -38,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusLabel = label("Checking backend…", size: 13, bold: false)
         statusLabel.textColor = .secondaryLabelColor
 
-        backendField = NSTextField(string: "http://127.0.0.1:3001")
+        backendField = NSTextField(string: "http://127.0.0.1:3002")
         backendField.placeholderString = "Backend URL"
         backendField.toolTip = "Use a loopback URL for a local backend."
 

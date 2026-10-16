@@ -11,3 +11,6 @@ desktop-macos/.build/
 desktop-macos/.swiftpm/
 *.log
 .DS_Store
+
+workspace/
+.run/

@@ -3,6 +3,7 @@ export interface JarvisModelRequest {
   userInput: string;
   timeoutMs?: number;
   images?: string[];
+  json?: boolean;
 }
 
 export interface JarvisModelClient {
@@ -17,7 +18,7 @@ export class OllamaModelClient implements JarvisModelClient {
   constructor(
     private readonly baseUrl: string,
     readonly model: string,
-    private readonly defaultTimeoutMs = 60_000,
+    private readonly defaultTimeoutMs = 180_000,
   ) {
     const parsed = new URL(baseUrl);
     if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
@@ -35,6 +36,8 @@ export class OllamaModelClient implements JarvisModelClient {
         body: JSON.stringify({
           model: this.model,
           stream: false,
+          keep_alive: '30m',
+          ...(request.json ? { format: 'json' } : {}),
           messages: [
             { role: 'system', content: request.instruction },
             { role: 'user', content: request.userInput, ...(request.images ? { images: request.images } : {}) },

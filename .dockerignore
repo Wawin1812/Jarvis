@@ -10,3 +10,4 @@ dist-test
 desktop-macos/.build
 desktop-macos/.swiftpm
 *.log
+workspace

@@ -27,6 +27,8 @@ export interface JarvisApproval {
 export interface JarvisAgentContext {
   task: JarvisTask;
   requestTool: (request: JarvisToolRequest) => Promise<JarvisToolResult>;
+  /** Present only for the coordinator; the specialist runs with its own capabilities. */
+  delegate?: (agentId: JarvisAgentId, goal: string, maxSteps: number) => Promise<JarvisAgentResult>;
 }
 
 export interface JarvisAgentResult {
@@ -61,6 +63,7 @@ export type JarvisAuditEventType =
   | 'tool.requested'
   | 'tool.allowed'
   | 'tool.denied'
+  | 'approval.requested'
   | 'screen.analyzed';
 
 export interface JarvisAuditEvent {

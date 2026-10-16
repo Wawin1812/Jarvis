@@ -25,3 +25,9 @@ header p { color: #94a3b8; font-size: 1.1rem; }
 .screen-preview { display: block; width: 100%; max-height: 360px; object-fit: contain; margin-top: 1rem; background: #020617; border-radius: 12px; }
 .analyze-screen-btn { margin-top: .6rem; background: #059669 !important; }.jarvis-note { color: #94a3b8; font-size: .8rem; margin-bottom: 0; }
 @media (max-width: 680px) { .jarvis-heading, .jarvis-config, .jarvis-command, .jarvis-permissions { align-items: stretch; flex-direction: column; } .jarvis-status { align-self: flex-start; } }
+
+.jarvis-command select { background: #1f2937; color: inherit; border: 1px solid #374151; border-radius: 6px; padding: 0.5rem; }
+.approval-card { margin-top: 0.75rem; padding: 0.75rem 1rem; border: 1px solid #f59e0b; border-radius: 8px; background: #2a2110; display: grid; gap: 0.5rem; }
+.approval-input { word-break: break-all; color: #fcd34d; }
+.approval-actions { display: flex; gap: 0.5rem; }
+.approval-actions .deny { background: #991b1b; }

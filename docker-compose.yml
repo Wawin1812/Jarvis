@@ -11,13 +11,16 @@ services:
       HOST: 0.0.0.0
       PORT: 3001
       JARVIS_DATA_DIR: /app/data/jarvis
+      JARVIS_FILES_ROOT: /workspace
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:1b}
     ports:
-      - "127.0.0.1:${JARVIS_PORT:-3001}:3001"
+      - "127.0.0.1:${JARVIS_PORT:-3002}:3001"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - jarvis-data:/app/data/jarvis
+      - ${JARVIS_FILES_DIR:-./workspace}:/workspace:ro
     read_only: true
     tmpfs:
       - /tmp:noexec,nosuid,size=64m

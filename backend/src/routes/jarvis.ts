@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
+import type { JarvisAgentId } from '../jarvis/contracts.js';
 import type { JarvisRuntime } from '../jarvis/runtime.js';
 
 interface HeaderRequest {
@@ -18,26 +19,33 @@ export function createJarvisRouter(runtime: JarvisRuntime, apiToken: string | un
   router.get('/status', (_req, res) => {
     res.json({
       status: 'ready',
-      privilegedToolsEnabled: false,
+      privilegedToolsEnabled: runtime.filesEnabled,
+      tools: runtime.filesEnabled ? ['files.read'] : [],
+      agents: runtime.agentIds,
       model: runtime.model ? { provider: runtime.model.provider, name: runtime.model.model } : null,
       persistentAudit: runtime.persistentAudit,
     });
   });
 
-  router.post('/tasks', async (req: Request, res: Response) => {
-    const { goal, agentId, maxSteps } = req.body ?? {};
+  function parseTask(body: unknown): { goal: string; agentId: JarvisAgentId; maxSteps: number } | { error: string } {
+    const { goal, agentId, maxSteps } = (body ?? {}) as Record<string, unknown>;
     if (typeof goal !== 'string' || goal.trim().length < 1 || goal.length > 4_000) {
-      return res.status(400).json({ error: 'goal must be a non-empty string of at most 4000 characters.' });
+      return { error: 'goal must be a non-empty string of at most 4000 characters.' };
     }
-    if (agentId !== undefined && agentId !== 'coordinator') {
-      return res.status(400).json({ error: 'Only the safe coordinator is enabled.' });
+    if (agentId !== undefined && !runtime.agentIds.includes(agentId as JarvisAgentId)) {
+      return { error: `agentId must be one of: ${runtime.agentIds.join(', ')}.` };
     }
-    if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 20)) {
-      return res.status(400).json({ error: 'maxSteps must be an integer from 1 to 20.' });
+    if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || (maxSteps as number) < 1 || (maxSteps as number) > 20)) {
+      return { error: 'maxSteps must be an integer from 1 to 20.' };
     }
+    return { goal, agentId: (agentId as JarvisAgentId | undefined) ?? 'coordinator', maxSteps: (maxSteps as number | undefined) ?? 10 };
+  }
 
+  router.post('/tasks', async (req: Request, res: Response) => {
+    const parsed = parseTask(req.body);
+    if ('error' in parsed) return res.status(400).json({ error: parsed.error });
     try {
-      const result = await runtime.authority.run(goal, 'coordinator', maxSteps ?? 10);
+      const result = await runtime.authority.run(parsed.goal, parsed.agentId, parsed.maxSteps);
       return res.status(201).json(result);
     } catch (error) {
       return res.status(400).json({ error: error instanceof Error ? error.message : 'Task could not be run.' });
@@ -45,18 +53,21 @@ export function createJarvisRouter(runtime: JarvisRuntime, apiToken: string | un
   });
 
   router.post('/tasks/async', (req: Request, res: Response) => {
-    const { goal, agentId, maxSteps } = req.body ?? {};
-    if (typeof goal !== 'string' || goal.trim().length < 1 || goal.length > 4_000) {
-      return res.status(400).json({ error: 'goal must be a non-empty string of at most 4000 characters.' });
-    }
-    if (agentId !== undefined && agentId !== 'coordinator') {
-      return res.status(400).json({ error: 'Only the safe coordinator is enabled.' });
-    }
-    if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 20)) {
-      return res.status(400).json({ error: 'maxSteps must be an integer from 1 to 20.' });
-    }
-    const task = runtime.tasks.submit(goal, 'coordinator', maxSteps ?? 10);
-    return res.status(202).json(task);
+    const parsed = parseTask(req.body);
+    if ('error' in parsed) return res.status(400).json({ error: parsed.error });
+    return res.status(202).json(runtime.tasks.submit(parsed.goal, parsed.agentId, parsed.maxSteps));
+  });
+
+  router.get('/approvals', (_req, res) => {
+    res.json({ approvals: runtime.approvals.list() });
+  });
+
+  router.post('/approvals/:id', (req: Request, res: Response) => {
+    const approve = (req.body as { approve?: unknown } | undefined)?.approve;
+    if (typeof approve !== 'boolean') return res.status(400).json({ error: 'approve must be true or false.' });
+    return runtime.approvals.decide(String(req.params.id), approve)
+      ? res.json({ ok: true })
+      : res.status(404).json({ error: 'Approval request not found or already settled.' });
   });
 
   router.post('/screen', async (req: Request, res: Response) => {
