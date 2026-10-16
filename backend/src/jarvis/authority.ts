@@ -21,11 +21,12 @@ export class JarvisAuthority {
     this.dispatcher = dispatcher;
   }
 
-  async run(goal: string, agentId: JarvisAgentId = 'coordinator', maxSteps = 10, onPartial?: (text: string) => void, background = false, taskId?: string): Promise<{ task: JarvisTask; result: JarvisAgentResult }> {
-    return this.runTask(goal, agentId, maxSteps, 0, onPartial, background, taskId);
+  async run(goal: string, agentId: JarvisAgentId = 'coordinator', maxSteps = 10, onPartial?: (text: string) => void, background = false, taskId?: string, signal?: AbortSignal): Promise<{ task: JarvisTask; result: JarvisAgentResult }> {
+    return this.runTask(goal, agentId, maxSteps, 0, onPartial, background, taskId, signal);
   }
 
-  private async runTask(goal: string, agentId: JarvisAgentId, maxSteps: number, depth: number, onPartial?: (text: string) => void, background = false, taskId?: string): Promise<{ task: JarvisTask; result: JarvisAgentResult }> {
+  private async runTask(goal: string, agentId: JarvisAgentId, maxSteps: number, depth: number, onPartial?: (text: string) => void, background = false, taskId?: string, signal?: AbortSignal): Promise<{ task: JarvisTask; result: JarvisAgentResult }> {
+    if (signal?.aborted) throw new Error('Cancelled.');
     if (!goal.trim()) throw new Error('Task goal must not be empty.');
     if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > MAX_STEPS) {
       throw new Error(`maxSteps must be an integer from 1 to ${MAX_STEPS}.`);
@@ -45,7 +46,8 @@ export class JarvisAuthority {
     try {
       const result = await agent.run({
         task,
-        requestTool: (request) => this.tools.execute(agent, task.id, request),
+        requestTool: (request) => this.tools.execute(agent, task.id, request, signal),
+        ...(signal ? { signal } : {}),
         ...(onPartial && depth === 0 ? { onPartial } : {}),
         ...(agentId === 'coordinator' && depth === 0 && this.dispatcher ? {
           dispatch: (subAgentId: JarvisAgentId, subGoal: string) => {
@@ -58,7 +60,7 @@ export class JarvisAuthority {
         ...(agentId === 'coordinator' && depth === 0 ? {
           delegate: async (subAgentId: JarvisAgentId, subGoal: string, subSteps: number) => {
             if (subAgentId === 'coordinator') throw new Error('The coordinator cannot delegate to itself.');
-            return (await this.runTask(subGoal, subAgentId, Math.min(subSteps, MAX_STEPS), depth + 1, undefined, background)).result;
+            return (await this.runTask(subGoal, subAgentId, Math.min(subSteps, MAX_STEPS), depth + 1, undefined, background, undefined, signal)).result;
           },
         } : {}),
       });

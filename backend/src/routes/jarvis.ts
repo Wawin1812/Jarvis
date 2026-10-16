@@ -59,6 +59,15 @@ export function createJarvisRouter(runtime: JarvisRuntime, apiToken: string | un
     return res.status(202).json(runtime.tasks.submit(parsed.goal, parsed.agentId, parsed.maxSteps, undefined, (req.body as { background?: unknown } | undefined)?.background === true));
   });
 
+  router.post('/tasks/:id/cancel', (req: Request, res: Response) => (
+    runtime.tasks.cancel(String(req.params.id)) ? res.json({ ok: true }) : res.status(404).json({ error: 'Task not found or already finished.' })
+  ));
+
+  // "Stop everything": cancels every queued or running task, including jobs agents started.
+  router.post('/cancel', (_req, res) => {
+    res.json({ ok: true, cancelled: runtime.tasks.cancelAll() });
+  });
+
   router.get('/approvals', (_req, res) => {
     res.json({ approvals: runtime.approvals.list() });
   });

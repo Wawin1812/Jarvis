@@ -32,6 +32,8 @@ export interface JarvisAgentContext {
   requestTool: (request: JarvisToolRequest) => Promise<JarvisToolResult>;
   /** Receives the reply text as it is being generated (top-level agent only). */
   onPartial?: (text: string) => void;
+  /** Aborted when the user stops the task; every model call, approval wait and web fetch honours it. */
+  signal?: AbortSignal;
   /** Starts another agent as a background job and returns its job id (coordinator only). */
   dispatch?: (agentId: JarvisAgentId, goal: string) => string;
   /** Present only for the coordinator; the specialist runs with its own capabilities. */

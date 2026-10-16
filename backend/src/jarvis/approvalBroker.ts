@@ -54,13 +54,14 @@ export class JarvisApprovalBroker {
     return { id: crypto.randomUUID(), capability, expiresAt: new Date(Date.now() + this.grantTtlMs).toISOString() };
   }
 
-  request(info: Pick<JarvisPendingApproval, 'taskId' | 'agentId' | 'capability' | 'summary'>): Promise<JarvisApproval | null> {
-    if (this.waiting.size >= this.maxPending) return Promise.resolve(null);
+  request(info: Pick<JarvisPendingApproval, 'taskId' | 'agentId' | 'capability' | 'summary'>, signal?: AbortSignal): Promise<JarvisApproval | null> {
+    if (signal?.aborted || this.waiting.size >= this.maxPending) return Promise.resolve(null);
     const id = crypto.randomUUID();
     const now = Date.now();
     return new Promise((resolve) => {
       const timer = setTimeout(() => this.settle(id, null), this.requestTimeoutMs);
       timer.unref();
+      signal?.addEventListener('abort', () => this.settle(id, null), { once: true });
       this.waiting.set(id, {
         ...info,
         id,

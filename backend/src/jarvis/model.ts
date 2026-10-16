@@ -110,22 +110,41 @@ export class PrioritizedModelClient implements JarvisModelClient {
 
   complete(request: JarvisModelRequest): Promise<string> {
     const background = request.priority === 'background';
+    const external = request.signal;
     return new Promise((resolve, reject) => {
+      if (external?.aborted) {
+        reject(new Error('Cancelled.'));
+        return;
+      }
       const order = this.sequence++;
+      let entry: { rank: number; order: number; start: () => void } | undefined;
+      // A cancelled call that is still waiting in the queue never reaches the model.
+      external?.addEventListener('abort', () => {
+        const index = entry ? this.queue.indexOf(entry) : -1;
+        if (index >= 0) {
+          this.queue.splice(index, 1);
+          reject(new Error('Cancelled.'));
+        }
+      }, { once: true });
       const enqueue = () => {
-        this.queue.push({ rank: background ? 1 : 0, order, start: run });
+        entry = { rank: background ? 1 : 0, order, start: run };
+        this.queue.push(entry);
         this.queue.sort((a, b) => a.rank - b.rank || a.order - b.order);
         this.next();
       };
       const run = () => {
         const controller = new AbortController();
+        const forward = () => controller.abort();
+        external?.addEventListener('abort', forward, { once: true });
         // Background partial text is unused, and a retried call must not replay tokens.
         const call = background ? { ...request, onToken: undefined, signal: controller.signal } : request;
         if (background) this.runningBackground.add(controller);
         this.inner.complete(call).then(resolve, (error) => {
-          if (controller.signal.aborted && background) enqueue();
+          // Aborted by pre-emption (not by the user): run again later.
+          if (background && controller.signal.aborted && !external?.aborted) enqueue();
           else reject(error);
         }).finally(() => {
+          external?.removeEventListener('abort', forward);
           this.runningBackground.delete(controller);
           this.active -= 1;
           this.next();

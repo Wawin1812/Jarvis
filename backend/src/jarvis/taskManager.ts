@@ -1,7 +1,7 @@
 import type { JarvisAgentId, JarvisAgentResult, JarvisTask } from './contracts.js';
 import type { JarvisAuthority } from './authority.js';
 
-export type JarvisManagedTaskStatus = 'queued' | 'running' | 'completed' | 'failed';
+export type JarvisManagedTaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface JarvisManagedTask {
   id: string;
@@ -34,6 +34,7 @@ function labelFor(goal: string): string {
 export class JarvisTaskManager {
   private readonly records = new Map<string, JarvisManagedTask>();
   private readonly waiting: string[] = [];
+  private readonly controllers = new Map<string, AbortController>();
   private running = 0;
 
   constructor(
@@ -64,6 +65,26 @@ export class JarvisTaskManager {
     return [...this.records.values()].map((record) => this.copy(record));
   }
 
+  /** Stops a task (and any jobs it started) at once: in-flight model calls, approval waits and fetches are aborted. */
+  cancel(id: string): boolean {
+    const record = this.records.get(id);
+    if (!record || (record.status !== 'queued' && record.status !== 'running')) return false;
+    const queuedAt = this.waiting.indexOf(id);
+    if (queuedAt >= 0) this.waiting.splice(queuedAt, 1);
+    record.status = 'cancelled';
+    record.error = 'Cancelled by user.';
+    record.updatedAt = new Date().toISOString();
+    this.controllers.get(id)?.abort();
+    for (const child of this.records.values()) if (child.parentId === id) this.cancel(child.id);
+    return true;
+  }
+
+  cancelAll(): number {
+    let count = 0;
+    for (const record of [...this.records.values()]) if (this.cancel(record.id)) count += 1;
+    return count;
+  }
+
   /** One line per job that another agent started, newest last; fed to the coordinator so it can report on them. */
   statusLines(limit = 8): string[] {
     return [...this.records.values()]
@@ -71,7 +92,7 @@ export class JarvisTaskManager {
       .slice(-limit)
       .map((record) => {
         const outcome = record.status === 'completed' ? `done: ${record.result?.summary.slice(0, 300) ?? ''}`
-          : record.status === 'failed' ? `failed: ${(record.error ?? record.result?.summary ?? '').slice(0, 150)}`
+          : record.status === 'failed' || record.status === 'cancelled' ? `${record.status}: ${(record.error ?? record.result?.summary ?? '').slice(0, 150)}`
             : record.status;
         return `${record.agentId} (job ${record.id.slice(0, 8)}) on "${record.label}" - ${outcome}`;
       });
@@ -90,19 +111,26 @@ export class JarvisTaskManager {
 
   private async execute(id: string): Promise<void> {
     const record = this.records.get(id);
-    if (!record) return;
+    if (!record || record.status !== 'queued') return;
     record.status = 'running';
     record.updatedAt = new Date().toISOString();
+    const controller = new AbortController();
+    this.controllers.set(id, controller);
     try {
-      const response = await this.authority.run(record.goal, record.agentId, record.maxSteps, (text) => { record.partial = text; }, record.background, record.id);
+      const response = await this.authority.run(record.goal, record.agentId, record.maxSteps, (text) => { if (record.status === 'running') record.partial = text; }, record.background, record.id, controller.signal);
+      if (record.status !== 'running') return;
       record.status = response.result.completed ? 'completed' : 'failed';
       if (!response.result.completed) record.error = response.result.summary;
       record.task = response.task;
       record.result = response.result;
     } catch (error) {
-      record.status = 'failed';
-      record.error = error instanceof Error ? error.message : 'Task failed.';
+      // A user cancel already set the final status; keep it.
+      if (record.status === 'running') {
+        record.status = 'failed';
+        record.error = error instanceof Error ? error.message : 'Task failed.';
+      }
     } finally {
+      this.controllers.delete(id);
       record.updatedAt = new Date().toISOString();
     }
   }
@@ -110,7 +138,7 @@ export class JarvisTaskManager {
   private prune(): void {
     for (const [id, record] of this.records) {
       if (this.records.size <= this.maxRecords) return;
-      if (record.status === 'completed' || record.status === 'failed') this.records.delete(id);
+      if (record.status === 'completed' || record.status === 'failed' || record.status === 'cancelled') this.records.delete(id);
     }
   }
 

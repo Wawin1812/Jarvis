@@ -65,14 +65,14 @@ export function parseSearchResults(html: string, limit = 5): SearchResult[] {
   return results;
 }
 
-async function fetchBody(start: URL): Promise<{ body: string; type: string }> {
+async function fetchBody(start: URL, cancel?: AbortSignal): Promise<{ body: string; type: string }> {
   let url = start;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     await assertPublicUrl(url.href);
     const response = await fetch(url, {
       redirect: 'manual',
       headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,text/plain,application/json;q=0.9' },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: cancel ? AbortSignal.any([AbortSignal.timeout(TIMEOUT_MS), cancel]) : AbortSignal.timeout(TIMEOUT_MS),
     });
     if (response.status >= 300 && response.status < 400 && response.headers.get('location')) {
       url = new URL(response.headers.get('location') as string, url);
@@ -99,18 +99,18 @@ async function fetchBody(start: URL): Promise<{ body: string; type: string }> {
 
 /** Read-only web access: `{query}` searches, `{url}` fetches one public page as plain text. */
 export function createWebReadHandler(): JarvisToolHandler {
-  return async (input) => {
+  return async (input, signal) => {
     const { query, url } = (input ?? {}) as { query?: unknown; url?: unknown };
     if (typeof query === 'string' && query.trim()) {
       const search = new URL('https://html.duckduckgo.com/html/');
       search.searchParams.set('q', query.trim().slice(0, 300));
-      const { body } = await fetchBody(search);
+      const { body } = await fetchBody(search, signal);
       const results = parseSearchResults(body, 4);
       if (!results.length) return 'No results found.';
       return results.map((r, i) => `${i + 1}. ${r.title}\n${r.snippet.slice(0, 220)}\n(${new URL(r.url).hostname})\n${r.url}`).join('\n\n');
     }
     if (typeof url === 'string' && url.length <= 2_000) {
-      const { body, type } = await fetchBody(await assertPublicUrl(url));
+      const { body, type } = await fetchBody(await assertPublicUrl(url), signal);
       const text = /html/i.test(type) ? htmlToText(body) : body;
       return text.slice(0, MAX_TEXT_CHARS) || '(empty page)';
     }

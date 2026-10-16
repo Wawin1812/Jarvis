@@ -3,7 +3,7 @@ import type { JarvisAgentDefinition, JarvisAuditEvent, JarvisToolRequest, Jarvis
 import type { JarvisAuditSink } from './auditLog.js';
 import type { JarvisApprovalBroker } from './approvalBroker.js';
 
-export type JarvisToolHandler = (input: unknown) => Promise<unknown>;
+export type JarvisToolHandler = (input: unknown, signal?: AbortSignal) => Promise<unknown>;
 
 export class JarvisToolGateway {
   constructor(
@@ -16,6 +16,7 @@ export class JarvisToolGateway {
     agent: JarvisAgentDefinition,
     taskId: string,
     request: JarvisToolRequest,
+    signal?: AbortSignal,
   ): Promise<JarvisToolResult> {
     this.record({ type: 'tool.requested', taskId, agentId: agent.id, capability: request.capability, detail: 'Tool requested.' });
 
@@ -32,7 +33,7 @@ export class JarvisToolGateway {
         this.record({ type: 'approval.requested', taskId, agentId: agent.id, capability: request.capability, detail: 'Waiting for a human decision.' });
         const granted = await this.broker.request({
           taskId, agentId: agent.id, capability: request.capability, summary: summarize(request.input),
-        });
+        }, signal);
         if (!granted) return this.deny(taskId, agent, request.capability, 'Approval was denied or timed out.');
         approval = granted;
       }
@@ -53,7 +54,7 @@ export class JarvisToolGateway {
 
     this.record({ type: 'tool.allowed', taskId, agentId: agent.id, capability: request.capability, detail: decision.reason });
     try {
-      return { ok: true, output: await handler(request.input) };
+      return { ok: true, output: await handler(request.input, signal) };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'Tool failed.' };
     }

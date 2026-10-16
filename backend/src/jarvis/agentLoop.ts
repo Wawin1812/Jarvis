@@ -106,6 +106,7 @@ async function tryFastReply(context: JarvisAgentContext, options: AgentLoopOptio
     userInput: `${contextBlock}\n\n${context.task.goal}`,
     maxTokens: 160,
     priority: context.task.background ? 'background' : 'foreground',
+    ...(context.signal ? { signal: context.signal } : {}),
     ...(options.fastModel ? { model: options.fastModel } : {}),
     onToken: (chunk) => {
       buffer += chunk;
@@ -189,10 +190,12 @@ export async function runAgentLoop(context: JarvisAgentContext, options: AgentLo
   const dispatched = new Set<string>();
 
   while (stepsUsed < maxSteps) {
+    if (context.signal?.aborted) return { summary: 'Cancelled.', completed: false, stepsUsed };
     stepsUsed += 1;
     const raw = await options.model.complete({
       instruction, userInput: transcript, json: true,
       priority: context.task.background ? 'background' : 'foreground',
+      ...(context.signal ? { signal: context.signal } : {}),
       ...(context.onPartial ? { onToken: (() => {
         let buffer = '';
         return (chunk: string) => {

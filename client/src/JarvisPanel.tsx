@@ -22,10 +22,11 @@ declare global {
 }
 
 type PendingApproval = { id: string; agentId: string; capability: string; summary: string };
-type AgentJob = { id: string; agentId: string; label: string; status: 'queued' | 'running' | 'completed' | 'failed'; parentId?: string; summary?: string };
+type AgentJob = { id: string; agentId: string; label: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; parentId?: string; summary?: string };
 
 const SLEEP_PHRASES = /^(goodbye|good bye|that'?s all)\.?$/i;
 const STOP_PHRASES = /^(stop listening|stop conversation)\.?$/i;
+const STOP_NOW = /^(stop|stop that|stop it|cancel|cancel that|never ?mind|be quiet|shut up|enough)[.!]?$/i;
 const WAKE_PHRASE = /^(?:(?:hey|hi|okay|ok)[,\s]+)?jarvis\b[,.!?\s]*/i;
 const TRUSTABLE = ['files.read', 'browser.read'];
 
@@ -70,6 +71,7 @@ export function JarvisPanel() {
   const foregroundIdsRef = useRef(new Set<string>());
   const ownedIdsRef = useRef(new Set<string>());
   const seededRef = useRef(false);
+  const cancelledRef = useRef(false);
   const awakeUntilRef = useRef(0);
   const speakRef = useRef(true);
   const sendRef = useRef<(text?: string) => Promise<void>>(async () => undefined);
@@ -78,6 +80,13 @@ export function JarvisPanel() {
   conversationRef.current = conversation;
 
   useEffect(() => () => stopScreenCapture(), []);
+
+  // Esc stops everything at once.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') void stopAll(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
 
   // Watch every agent job on the backend (including ones the coordinator starts) and announce finished ones.
   useEffect(() => {
@@ -183,8 +192,26 @@ export function JarvisPanel() {
     else speakNow(complete);
   }
 
-  function resumeListening() {
-    if (conversationRef.current && !busyRef.current && !speechRef.current && !window.speechSynthesis?.speaking) startListening();
+  function resumeListening(allowBusy = false) {
+    if (conversationRef.current && (allowBusy === true || !busyRef.current) && !speechRef.current && !window.speechSynthesis?.speaking) startListening();
+  }
+
+  // Silence JARVIS and cancel every running task right now; the UI resets before the server even answers.
+  async function stopAll() {
+    cancelledRef.current = true;
+    window.speechSynthesis?.cancel();
+    setApprovals([]);
+    setLive('');
+    setPhase('');
+    if (busyRef.current || jobs.some((job) => job.status === 'running' || job.status === 'queued')) {
+      setMessages((current) => [...current, 'JARVIS: stopped.']);
+    }
+    if (!token.trim()) return;
+    try {
+      await api('/cancel', { method: 'POST' });
+    } catch {
+      // The backend may be unreachable; local state is already reset.
+    }
   }
 
   async function sendCommand(text?: string) {
@@ -193,6 +220,12 @@ export function JarvisPanel() {
       setMessages((current) => [...current, 'JARVIS: enter a command and API token first.']);
       return;
     }
+    if (STOP_NOW.test(raw)) {
+      setGoal('');
+      await stopAll();
+      return;
+    }
+    if (busyRef.current) return;
     if (SLEEP_PHRASES.test(raw)) {
       awakeUntilRef.current = 0;
       setMessages((current) => [...current, 'JARVIS: going back to sleep. Say “Hey Jarvis” to wake me.']);
@@ -232,9 +265,12 @@ export function JarvisPanel() {
 
     setBusy(true);
     busyRef.current = true;
+    cancelledRef.current = false;
     setPhase('Thinking…');
     setLive('');
     spokenRef.current = 0;
+    // Keep the mic open while thinking so a spoken "stop" works; speech output closes it again.
+    if (conversationRef.current) setTimeout(() => resumeListening(true), 500);
     let spokeAnswer = false;
     try {
       const response = await api('/tasks/async', { method: 'POST', body: JSON.stringify({ goal: withHistory(request), agentId: agent }) });
@@ -242,12 +278,18 @@ export function JarvisPanel() {
       if (!response.ok) throw new Error(task.error || `HTTP ${response.status}`);
       foregroundIdsRef.current.add(task.id);
       ownedIdsRef.current.add(task.id);
+      if (cancelledRef.current) {
+        await api(`/tasks/${task.id}/cancel`, { method: 'POST' });
+        return;
+      }
       let tick = 0;
       while (task.status === 'queued' || task.status === 'running') {
         await new Promise((resolve) => setTimeout(resolve, 150));
+        if (cancelledRef.current) return;
         const taskResponse = await api(`/tasks/${task.id}`);
         if (!taskResponse.ok) throw new Error(`HTTP ${taskResponse.status}`);
         task = await taskResponse.json();
+        if (cancelledRef.current) return;
         if (typeof task.partial === 'string' && task.partial) {
           setLive(task.partial);
           setPhase('');
@@ -261,6 +303,7 @@ export function JarvisPanel() {
         }
       }
       setApprovals([]);
+      if (task.status === 'cancelled') return;
       if (task.status === 'failed') throw new Error(task.error || 'Task failed.');
       const answer: string = task.result?.summary || JSON.stringify(task);
       setMessages((current) => [...current, `${agent}: ${answer}`]);
@@ -270,6 +313,7 @@ export function JarvisPanel() {
       awakeUntilRef.current = Date.now() + 30_000;
       setGoal('');
     } catch (error) {
+      if (cancelledRef.current) return;
       const message = error instanceof Error ? error.message : 'request failed';
       setMessages((current) => [...current, `JARVIS error: ${message}`]);
       speakNow(`Sorry, something went wrong. ${message}`, resumeListening);
@@ -286,6 +330,15 @@ export function JarvisPanel() {
 
   // Hands-free: act on "Hey Jarvis …" or, for 30 s after the last exchange, on any follow-up; otherwise stay asleep.
   function handleHeard(transcript: string) {
+    // A spoken stop always works, awake or not.
+    if (STOP_NOW.test(transcript.trim())) {
+      void sendRef.current(transcript);
+      return;
+    }
+    if (busyRef.current) {
+      setTimeout(() => resumeListening(true), 300);
+      return;
+    }
     if (!conversationRef.current) {
       setGoal(transcript);
       void sendRef.current(transcript);
@@ -328,7 +381,7 @@ export function JarvisPanel() {
       setListening(false);
       speechRef.current = null;
       // In conversation mode keep the mic open if nothing was said.
-      if (conversationRef.current && !heardRef.current && !busyRef.current) setTimeout(resumeListening, 300);
+      if (conversationRef.current && !heardRef.current) setTimeout(() => resumeListening(true), 300);
     };
     recognition.onerror = (event) => {
       setListening(false);
@@ -453,6 +506,9 @@ export function JarvisPanel() {
         <input value={goal} onChange={(event) => setGoal(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void sendCommand(); }} placeholder="Tell JARVIS what to do…" aria-label="JARVIS command" disabled={busy} />
         <button type="button" onClick={toggleSpeech} className={listening ? 'permission-btn active' : 'permission-btn'}>{listening ? 'Stop voice' : 'Voice'}</button>
         <button type="button" onClick={() => void sendCommand()} disabled={busy}>{busy ? 'Working…' : 'Send'}</button>
+        {(busy || jobs.some((job) => job.status === 'running' || job.status === 'queued')) && (
+          <button type="button" className="deny" onClick={() => void stopAll()} title="Stop everything (Esc)">Stop</button>
+        )}
       </div>
       {phase && <p className="jarvis-note" role="status">{phase}</p>}
       <div className="jarvis-toggles">
@@ -491,7 +547,7 @@ export function JarvisPanel() {
         <ul className="jarvis-tasks" aria-label="Agent jobs">
           {jobs.map((job) => (
             <li key={job.id}>
-              <strong>{job.status === 'queued' ? 'Queued' : job.status === 'running' ? 'Working' : job.status === 'completed' ? 'Done' : 'Failed'}</strong> · {job.parentId ? job.agentId : 'background'} · {job.label}{job.summary ? ` — ${job.summary.slice(0, 120)}` : ''}
+              <strong>{job.status === 'queued' ? 'Queued' : job.status === 'running' ? 'Working' : job.status === 'completed' ? 'Done' : job.status === 'cancelled' ? 'Stopped' : 'Failed'}</strong> · {job.parentId ? job.agentId : 'background'} · {job.label}{job.summary ? ` — ${job.summary.slice(0, 120)}` : ''}
             </li>
           ))}
         </ul>

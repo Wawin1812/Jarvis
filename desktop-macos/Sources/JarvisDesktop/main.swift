@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
     private var backgroundCheckbox: NSButton!
     private var conversationCheckbox: NSButton!
     private var awakeUntil = Date.distantPast
+    private var stopButton: NSButton!
     private var monitorTimer: Timer?
     private var announced = Set<String>()
     private var ownedIds = Set<String>()
@@ -85,6 +86,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
         commandField.target = self
         commandField.action = #selector(sendCommand)
         sendButton = button("Send", action: #selector(sendCommand))
+        stopButton = button("Stop", action: #selector(stopTapped))
+        stopButton.keyEquivalent = "\u{1b}"
+        stopButton.contentTintColor = .systemRed
+        stopButton.toolTip = "Stop everything now (Esc)"
 
         outputView = NSTextView()
         outputView.isEditable = false
@@ -103,7 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
             horizontalStack([tokenField, saveButton]),
             horizontalStack([healthButton, micButton, screenButton, analyzeScreenButton]),
         ], spacing: 8)
-        let commandStack = horizontalStack([commandField, sendButton])
+        let commandStack = horizontalStack([commandField, sendButton, stopButton])
         speakCheckbox = NSButton(checkboxWithTitle: "Speak replies aloud", target: nil, action: nil)
         speakCheckbox.state = .on
         backgroundCheckbox = NSButton(checkboxWithTitle: "Run tasks in the background", target: nil, action: nil)
@@ -177,6 +182,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
         _ = base
     }
 
+    private static let stopPattern = #"^(stop|stop that|stop it|cancel|cancel that|never ?mind|be quiet|shut up|enough)[.!]?$"#
+
+    @objc private func stopTapped() { stopAll() }
+
+    // Silence JARVIS and cancel every running task right now; the UI resets before the backend even answers.
+    private func stopAll() {
+        synthesizer.stopSpeaking(at: .immediate)
+        let hadWork = !watches.isEmpty
+        watches.removeAll()
+        pollTimer?.invalidate()
+        pollTimer = nil
+        sendButton.isEnabled = true
+        if hadWork { appendOutput("JARVIS: stopped.") }
+        if conversationCheckbox.state != .on, audioEngine != nil { teardownVoice(send: false) }
+        request(path: "/api/jarvis/cancel", method: "POST", body: [:]) { _ in }
+        if conversationCheckbox.state == .on {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.resumeListening() }
+        }
+    }
+
     @objc private func sendCommand() {
         let raw = commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return }
@@ -184,6 +209,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
             showError("Configure the JARVIS API token first.")
             return
         }
+        if raw.range(of: Self.stopPattern, options: [.regularExpression, .caseInsensitive]) != nil {
+            commandField.stringValue = ""
+            stopAll()
+            return
+        }
+        if foregroundBusy { return }
         if raw.range(of: #"^(goodbye|good bye|that'?s all)\.?$"#, options: [.regularExpression, .caseInsensitive]) != nil {
             awakeUntil = .distantPast
             commandField.stringValue = ""
@@ -223,6 +254,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
                         self.speak("On it. I will tell you when it is done.")
                     }
                     self.startPolling()
+                    // Keep the mic open while thinking so a spoken "stop" works; speech output closes it again.
+                    if !background, self.conversationCheckbox.state == .on {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.resumeListening(allowBusy: true) }
+                    }
                 case .failure(let error):
                     self.sendButton.isEnabled = true
                     self.appendOutput("JARVIS error: \(error.localizedDescription)")
@@ -338,8 +373,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
     }
 
     // Re-opens the microphone in hands-free mode once JARVIS is done talking and no foreground task is running.
-    private func resumeListening() {
-        guard conversationCheckbox.state == .on, audioEngine == nil, !synthesizer.isSpeaking, !foregroundBusy, !promptingApproval else { return }
+    private func resumeListening(allowBusy: Bool = false) {
+        guard conversationCheckbox.state == .on, audioEngine == nil, !synthesizer.isSpeaking, allowBusy || !foregroundBusy, !promptingApproval else { return }
         toggleVoice()
     }
 
@@ -369,6 +404,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
                     } else if status == "failed" {
                         let reason = task["error"] as? String ?? "task failed"
                         self.completeTask(id, watch, text: "JARVIS error: \(reason)", spoken: "Sorry, \(reason)", answer: nil)
+                    } else if status == "cancelled" {
+                        self.completeTask(id, watch, text: "JARVIS: stopped.", spoken: nil, answer: nil)
                     }
                 }
             }
@@ -545,7 +582,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
                 let handsFree = self.conversationCheckbox.state == .on
                 if !handsFree { self.appendOutput("Didn’t hear anything.") }
                 self.teardownVoice(send: false)
-                if handsFree { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.resumeListening() } }
+                if handsFree { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.resumeListening(allowBusy: true) } }
             }
             else { self.endVoiceInput() }
         }
@@ -590,6 +627,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDel
 
     // Hands-free: act on "Hey Jarvis …" or, for 30 s after the last exchange, on any follow-up; otherwise stay asleep.
     private func handleHandsFree(_ transcript: String) {
+        // A spoken stop always works, awake or not; anything else is ignored while a task is running.
+        if transcript.trimmingCharacters(in: .whitespaces).range(of: Self.stopPattern, options: [.regularExpression, .caseInsensitive]) != nil {
+            commandField.stringValue = transcript
+            sendCommand()
+            return
+        }
+        if foregroundBusy {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.resumeListening(allowBusy: true) }
+            return
+        }
         let wake = #"^(?:(?:hey|hi|okay|ok)[,\s]+)?jarvis\b[,.!?\s]*"#
         if let range = transcript.range(of: wake, options: [.regularExpression, .caseInsensitive]) {
             let rest = String(transcript[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
