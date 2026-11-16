@@ -3,6 +3,7 @@ export type JarvisCapability =
   | 'screen.read'
   | 'files.read'
   | 'files.write'
+  | 'knowledge.read'
   | 'process.run'
   | 'browser.read'
   | 'browser.interact'

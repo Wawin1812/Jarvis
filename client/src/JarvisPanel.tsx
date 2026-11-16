@@ -1,4 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
+import { toChat } from './chat';
+import { ActivityFeed } from './components/ActivityFeed';
+import { ApprovalCard } from './components/ApprovalCard';
+import { ChatThread } from './components/ChatThread';
+import { Composer } from './components/Composer';
+import { Icon } from './components/Icon';
+import { Sidebar } from './components/Sidebar';
+import type { AgentJob, OrbState, PendingApproval } from './types';
+import { useJarvisData } from './useJarvisData';
 
 const DEFAULT_API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:3002';
 
@@ -20,9 +29,6 @@ declare global {
     webkitSpeechRecognition?: SpeechRecognitionConstructor;
   }
 }
-
-type PendingApproval = { id: string; agentId: string; capability: string; summary: string };
-type AgentJob = { id: string; agentId: string; label: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; parentId?: string; summary?: string };
 
 const SLEEP_PHRASES = /^(goodbye|good bye|that'?s all)\.?$/i;
 const STOP_PHRASES = /^(stop listening|stop conversation)\.?$/i;
@@ -82,6 +88,24 @@ export function JarvisPanel() {
   conversationRef.current = conversation;
   requireWakeRef.current = requireWake;
 
+  const connected = statusTone === 'good';
+  const data = useJarvisData(api, connected ? token : '', apiBase);
+  const working = jobs.some((job) => job.status === 'running' || job.status === 'queued');
+  const orb: OrbState = !connected ? 'offline' : listening ? 'listening' : busy || phase ? 'thinking' : 'idle';
+
+  // Editing the connection details invalidates the current connection until the user connects again.
+  function changeToken(value: string) {
+    setToken(value);
+    setStatusTone('neutral');
+    setStatus('Not connected');
+  }
+
+  function changeApiBase(value: string) {
+    setApiBase(value);
+    setStatusTone('neutral');
+    setStatus('Not connected');
+  }
+
   useEffect(() => () => stopScreenCapture(), []);
 
   // Esc stops everything at once.
@@ -135,6 +159,11 @@ export function JarvisPanel() {
       setStatusTone('good');
       if (token.trim()) {
         const info = await api('/status');
+        if (info.status === 401) {
+          setStatus('Token rejected');
+          setStatusTone('bad');
+          return;
+        }
         if (info.ok) setAgents((await info.json()).agents ?? ['coordinator']);
       }
     } catch (error) {
@@ -501,80 +530,97 @@ export function JarvisPanel() {
     }
   }
 
+  const statusText = connected ? `Online · ${data.server?.model?.name ?? 'ready'}` : status;
+  const tools = data.server?.tools ?? [];
+
   return (
-    <section className="jarvis-panel">
-      <div className="jarvis-heading">
-        <div>
-          <h2>JARVIS local assistant</h2>
-          <p>Visible, permission-based control surface for the local backend.</p>
-        </div>
-        <span className={`jarvis-status ${statusTone}`}>{status}</span>
-      </div>
+    <div className="hud">
+      <Sidebar
+        orb={orb}
+        statusText={statusText}
+        apiBase={apiBase}
+        onApiBase={changeApiBase}
+        token={token}
+        onToken={changeToken}
+        onConnect={() => void checkBackend()}
+        agents={agents}
+        activeAgent={agent}
+        onAgent={setAgent}
+        jobs={jobs}
+        server={data.server}
+        notes={data.notes}
+        onForget={(note) => void data.forget(note)}
+        onReindex={data.reindex}
+        onRevokeTrust={() => void data.revokeTrust()}
+        speakReplies={speakReplies}
+        onSpeakReplies={(value) => { setSpeakReplies(value); if (!value) window.speechSynthesis?.cancel(); }}
+        runInBackground={runInBackground}
+        onRunInBackground={setRunInBackground}
+        conversation={conversation}
+        onConversation={toggleConversation}
+        requireWake={requireWake}
+        onRequireWake={setRequireWake}
+        screenSharing={screenSharing}
+        onToggleScreen={() => void toggleScreenCapture()}
+        onMic={() => void requestMicrophone()}
+      />
 
-      <div className="jarvis-config">
-        <input value={apiBase} onChange={(event) => setApiBase(event.target.value)} aria-label="JARVIS backend URL" placeholder="http://127.0.0.1:3002" />
-        <input value={token} onChange={(event) => setToken(event.target.value)} aria-label="JARVIS API token" placeholder="API token (kept in this tab only)" type="password" />
-        <button type="button" onClick={checkBackend}>Check backend</button>
-      </div>
+      <main className="stage">
+        <header className="topbar">
+          <h1>Conversation</h1>
+          <div className="pills">
+            {data.server?.model && <span className="pill ok">{data.server.model.name}</span>}
+            {tools.map((tool) => <span key={tool} className="pill">{tool}</span>)}
+            {data.server?.persistentAudit && <span className="pill">audit encrypted</span>}
+            <span className="pill">local only</span>
+          </div>
+        </header>
 
-      <div className="jarvis-command">
-        <select value={agent} onChange={(event) => setAgent(event.target.value)} aria-label="Agent" disabled={busy}>
-          {agents.map((id) => <option key={id} value={id}>{id}</option>)}
-        </select>
-        <input value={goal} onChange={(event) => setGoal(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void sendCommand(); }} placeholder="Tell JARVIS what to do…" aria-label="JARVIS command" disabled={busy} />
-        <button type="button" onClick={toggleSpeech} className={listening ? 'permission-btn active' : 'permission-btn'}>{listening ? 'Stop voice' : 'Voice'}</button>
-        <button type="button" onClick={() => void sendCommand()} disabled={busy}>{busy ? 'Working…' : 'Send'}</button>
-        {(busy || jobs.some((job) => job.status === 'running' || job.status === 'queued')) && (
-          <button type="button" className="deny" onClick={() => void stopAll()} title="Stop everything (Esc)">Stop</button>
-        )}
-      </div>
-      {phase && <p className="jarvis-note" role="status">{phase}</p>}
-      <div className="jarvis-toggles">
-        <label className="jarvis-note">
-          <input type="checkbox" checked={speakReplies} onChange={(event) => { setSpeakReplies(event.target.checked); if (!event.target.checked) window.speechSynthesis?.cancel(); }} /> Speak replies aloud
-        </label>
-        <label className="jarvis-note">
-          <input type="checkbox" checked={runInBackground} onChange={(event) => setRunInBackground(event.target.checked)} /> Run tasks in the background
-        </label>
-        <label className="jarvis-note">
-          <input type="checkbox" checked={conversation} onChange={(event) => toggleConversation(event.target.checked)} /> Hands-free conversation (say “goodbye” to stop)
-        </label>
-        <label className="jarvis-note">
-          <input type="checkbox" checked={requireWake} onChange={(event) => setRequireWake(event.target.checked)} /> Only respond after “Hey Jarvis”
-        </label>
-      </div>
+        <ChatThread
+          messages={toChat(messages)}
+          live={live}
+          liveSpeaker={agent}
+          phase={phase}
+          orb={orb}
+          onSuggest={(text) => { setGoal(text); }}
+        />
 
-      <div className="jarvis-permissions">
-        <button type="button" onClick={() => void requestMicrophone()}>Enable microphone</button>
-        <button type="button" onClick={() => void toggleScreenCapture()}>{screenSharing ? 'Stop screen capture' : 'Capture screen'}</button>
-      </div>
-
-      {screenSharing && <>
-        <video className="screen-preview" ref={videoRef} autoPlay muted aria-label="Live screen capture preview" />
-        <button type="button" className="analyze-screen-btn" onClick={() => void analyzeVisibleScreen()} disabled={screenBusy}>{screenBusy ? 'Analyzing locally…' : 'Analyze this frame'}</button>
-      </>}
-      {approvals.map((item) => (
-        <div key={item.id} className="approval-card" role="alertdialog" aria-label="Approval required">
-          <div><strong>{item.agentId}</strong> wants to use <code>{item.capability}</code></div>
-          <code className="approval-input">{item.summary}</code>
-          <div className="approval-actions">
-            <button type="button" onClick={() => void decide(item.id, true)}>Approve once</button>
-            {TRUSTABLE.includes(item.capability) && <button type="button" onClick={() => void decide(item.id, true, true)}>Allow for 30 min</button>}
-            <button type="button" className="deny" onClick={() => void decide(item.id, false)}>Deny</button>
+        <div className="dock">
+          {approvals.map((item) => (
+            <ApprovalCard key={item.id} item={item} trustable={TRUSTABLE.includes(item.capability)} onDecide={(id, approve, remember) => void decide(id, approve, remember)} />
+          ))}
+          <div className="screen-box" hidden={!screenSharing}>
+            <video ref={videoRef} autoPlay muted aria-label="Live screen capture preview" />
+            <button type="button" className="btn primary" onClick={() => void analyzeVisibleScreen()} disabled={screenBusy}>
+              <Icon name="screen" size={15} />{screenBusy ? 'Analysing locally…' : 'Analyse this frame'}
+            </button>
+            <p className="muted small">Sent only when you click, and only to your local model.</p>
           </div>
         </div>
-      ))}
-      {jobs.length > 0 && (
-        <ul className="jarvis-tasks" aria-label="Agent jobs">
-          {jobs.map((job) => (
-            <li key={job.id}>
-              <strong>{job.status === 'queued' ? 'Queued' : job.status === 'running' ? 'Working' : job.status === 'completed' ? 'Done' : job.status === 'cancelled' ? 'Stopped' : 'Failed'}</strong> · {job.parentId ? job.agentId : 'background'} · {job.label}{job.summary ? ` — ${job.summary.slice(0, 120)}` : ''}
-            </li>
-          ))}
-        </ul>
-      )}
-      <pre className="jarvis-output" aria-live="polite">{[...messages, ...(live ? [`${agent}: ${live}…`] : [])].join('\n\n')}</pre>
-      <p className="jarvis-note">Screen frames are sent only when you click “Analyze this frame”, and only to the configured backend/model. Microphone audio is not uploaded; browser speech recognition may use the browser’s speech service.</p>
-    </section>
+
+        <Composer
+          goal={goal}
+          onGoal={setGoal}
+          onSend={() => void sendCommand()}
+          onStop={() => void stopAll()}
+          onVoice={toggleSpeech}
+          busy={busy}
+          working={working}
+          listening={listening}
+          ready={connected}
+          agent={agent}
+          agents={agents}
+          onAgent={setAgent}
+        />
+      </main>
+
+      <aside className="rail" aria-label="Activity">
+        <div className="panel-head">
+          <span>Activity</span>
+          {(busy || working) && <span className="live-dot">live</span>}
+        </div>
+        <ActivityFeed events={data.events} />
+      </aside>
+    </div>
   );
 }

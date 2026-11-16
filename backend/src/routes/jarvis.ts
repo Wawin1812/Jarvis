@@ -20,7 +20,9 @@ export function createJarvisRouter(runtime: JarvisRuntime, apiToken: string | un
     res.json({
       status: 'ready',
       privilegedToolsEnabled: runtime.filesEnabled,
-      tools: [...(runtime.filesEnabled ? ['files.read'] : []), ...(runtime.writeEnabled ? ['files.write'] : []), ...(runtime.webEnabled ? ['web.search', 'web.fetch'] : []), ...(process.env.JARVIS_OPEN === 'true' ? ['open'] : [])],
+      tools: [...(runtime.filesEnabled ? ['files.read'] : []), ...(runtime.writeEnabled ? ['files.write'] : []), ...(runtime.webEnabled ? ['web.search', 'web.fetch'] : []), ...(runtime.knowledge ? ['knowledge.search'] : []), ...(process.env.JARVIS_OPEN === 'true' ? ['open'] : [])],
+      knowledge: runtime.knowledge ? runtime.knowledge.stats() : null,
+      memoryNotes: runtime.memory.list().length,
       agents: runtime.agentIds,
       model: runtime.model ? { provider: runtime.model.provider, name: runtime.model.model } : null,
       persistentAudit: runtime.persistentAudit,
@@ -83,6 +85,31 @@ export function createJarvisRouter(runtime: JarvisRuntime, apiToken: string | un
   router.delete('/trust', (_req, res) => {
     runtime.approvals.revokeTrust();
     res.json({ ok: true });
+  });
+
+  router.get('/memory', (_req, res) => {
+    res.json({ notes: runtime.memory.list() });
+  });
+
+  router.post('/memory/forget', (req: Request, res: Response) => {
+    const note = (req.body as { note?: unknown } | undefined)?.note;
+    if (typeof note !== 'string' || !note.trim() || note.length > 300) return res.status(400).json({ error: 'note must be a non-empty string.' });
+    return res.json({ message: runtime.memory.forget(note), notes: runtime.memory.list() });
+  });
+
+  router.get('/knowledge', (_req, res) => {
+    if (!runtime.knowledge) return res.status(404).json({ error: 'Document search is not enabled (set JARVIS_KNOWLEDGE=true).' });
+    return res.json(runtime.knowledge.stats());
+  });
+
+  // User-triggered re-index of the workspace; embedding runs locally in Ollama.
+  router.post('/knowledge/index', async (_req, res) => {
+    if (!runtime.knowledge) return res.status(404).json({ error: 'Document search is not enabled (set JARVIS_KNOWLEDGE=true).' });
+    try {
+      return res.json(await runtime.knowledge.index());
+    } catch (error) {
+      return res.status(502).json({ error: error instanceof Error ? error.message : 'Indexing failed.' });
+    }
   });
 
   router.post('/screen', async (req: Request, res: Response) => {

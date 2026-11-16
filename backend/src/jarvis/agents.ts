@@ -34,8 +34,10 @@ export function createModelAgents(
   fastModel?: string,
   fastChat = false,
   openEnabled = false,
+  knowledgeEnabled = false,
 ): JarvisAgentDefinition[] {
   const capabilities = new Set<JarvisCapability>(filesEnabled ? ['chat', 'files.read'] : ['chat']);
+  if (knowledgeEnabled) capabilities.add('knowledge.read');
   const coordinatorCapabilities = new Set<JarvisCapability>(capabilities);
   if (writeEnabled) coordinatorCapabilities.add('files.write');
   if (webEnabled) coordinatorCapabilities.add('browser.read');
@@ -50,7 +52,7 @@ export function createModelAgents(
       id,
       description: SPECIALISTS[id].description,
       capabilities: web ? new Set<JarvisCapability>([...capabilities, 'browser.read']) : capabilities,
-      run: (context) => runAgentLoop(context, { model, role: SPECIALISTS[id].role, filesEnabled, webEnabled: web }),
+      run: (context) => runAgentLoop(context, { model, role: SPECIALISTS[id].role, filesEnabled, webEnabled: web, knowledgeEnabled }),
     };
   });
 
@@ -64,6 +66,7 @@ export function createModelAgents(
       writeEnabled,
       webEnabled,
       openEnabled,
+      knowledgeEnabled,
       ...(memory ? { memory } : {}),
       ...(agentStatus ? { agentStatus, canDispatch: true } : {}),
       fastChat,

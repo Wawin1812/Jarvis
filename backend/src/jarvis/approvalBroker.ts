@@ -17,7 +17,7 @@ interface Waiter extends JarvisPendingApproval {
 }
 
 /** Only read-only capabilities can be trusted, and file reads and web reads are never trusted together. */
-const TRUSTABLE: ReadonlySet<JarvisCapability> = new Set(['files.read', 'browser.read']);
+const TRUSTABLE: ReadonlySet<JarvisCapability> = new Set(['files.read', 'browser.read', 'knowledge.read']);
 
 /** Only a human decision through `decide` can mint an approval; agents never create their own. */
 export class JarvisApprovalBroker {

@@ -6,7 +6,7 @@ const MAX_FILE_BYTES = 200_000;
 const MAX_LISTING = 200;
 const SENSITIVE_NAME = /^(\.env.*|\.git|\.ssh|\.aws|\.gnupg|\.npmrc|id_(rsa|dsa|ecdsa|ed25519).*|.*\.(pem|key|p12|pfx|keystore))$/i;
 
-function isSensitive(name: string): boolean {
+export function isSensitive(name: string): boolean {
   return SENSITIVE_NAME.test(name);
 }
 

@@ -73,6 +73,7 @@ export type JarvisAuditEventType =
   | 'tool.allowed'
   | 'tool.denied'
   | 'approval.requested'
+  | 'knowledge.indexed'
   | 'screen.analyzed';
 
 export interface JarvisAuditEvent {
